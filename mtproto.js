@@ -7,13 +7,12 @@ const apiId = parseInt(process.env.TG_API_ID);
 const apiHash = process.env.TG_API_HASH;
 
 async function generarExcelHistorial(chatIdMsg, tokenBot, responder) {
-    // 👈 Usa la sesión guardada en TG_SESSION
+    // Usa la sesión guardada en TG_SESSION
     const stringSession = new StringSession(process.env.TG_SESSION || "");
     const client = new TelegramClient(stringSession, apiId, apiHash, {
         connectionRetries: 5,
     });
 
-    // 👈 Conecta usando la sesión ya guardada (NO pide código)
     await client.connect();
 
     if (!(await client.checkAuthorization())) {
@@ -39,9 +38,12 @@ async function generarExcelHistorial(chatIdMsg, tokenBot, responder) {
     const messages = await client.getMessages(peer, { limit: 5000 });
     await client.disconnect();
 
-    // Agrupar por ID de solicitud
+    console.log(`📥 Mensajes leídos: ${messages.length}`);
+    await responder(`📥 Mensajes leídos del chat: ${messages.length}`);
+
+    // Agrupar por ID de solicitud (acepta HTML y texto plano)
     const grupos = {};
-    const regexID = /<b>ID:<\/b>\s*<code>([^<]+)<\/code>/;
+    const regexID = /(?:<b>)?ID:(?:<\/b>)?\s*(?:<code>)?([A-Z0-9\-]+)/i;
 
     for (const msg of messages) {
         if (!msg.message) continue;
@@ -62,11 +64,20 @@ async function generarExcelHistorial(chatIdMsg, tokenBot, responder) {
         }
     }
 
-    // Extraer campos
+    console.log(`📋 Solicitudes agrupadas: ${Object.keys(grupos).length}`);
+    await responder(`📋 Solicitudes encontradas: ${Object.keys(grupos).length}`);
+
+    // Extraer campos (tolera HTML y texto plano)
     const filas = [];
     const extraer = (texto, etiqueta) => {
-        const re = new RegExp(`<b>${etiqueta}:<\\/b>\\s*(?:<code>)?([^<\\n]*)`, 'i');
-        const m = texto.match(re);
+        const etiquetaEsc = etiqueta.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        // Intenta con HTML: <b>Etiqueta:</b> <code>valor</code>
+        let re = new RegExp(`<b>${etiquetaEsc}:<\\/b>\\s*(?:<code>)?([^<\\n]*)`, 'i');
+        let m = texto.match(re);
+        if (m) return m[1].trim();
+        // Fallback texto plano: Etiqueta: valor
+        re = new RegExp(`${etiquetaEsc}:\\s*([^\\n]*)`, 'i');
+        m = texto.match(re);
         return m ? m[1].trim() : '';
     };
 
